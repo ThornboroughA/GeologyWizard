@@ -29,6 +29,12 @@ class ProjectStore:
         ensure_dir(root / "cache" / "crust_type")
         ensure_dir(root / "cache" / "crust_thickness")
         ensure_dir(root / "cache" / "tectonic_potential")
+        ensure_dir(root / "cache" / "uplift_rate")
+        ensure_dir(root / "cache" / "subsidence_rate")
+        ensure_dir(root / "cache" / "volcanic_flux")
+        ensure_dir(root / "cache" / "erosion_capacity")
+        ensure_dir(root / "cache" / "orogenic_root")
+        ensure_dir(root / "cache" / "craton_id")
         ensure_dir(root / "tectonics")
         self.write_json(root / "working" / "config.json", config_json)
         # Placeholders for GPML/ROT interoperability files.
@@ -41,6 +47,7 @@ class ProjectStore:
         ensure_dir(run_root / "frames")
         ensure_dir(run_root / "render_frames")
         ensure_dir(run_root / "diagnostics")
+        ensure_dir(run_root / "module_states")
         return run_root
 
     def frame_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
@@ -112,6 +119,24 @@ class ProjectStore:
     def tectonic_potential_array_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
         return self.project_dir(project_id) / "cache" / "tectonic_potential" / f"{run_id}_{time_ma}.npy"
 
+    def uplift_rate_array_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
+        return self.project_dir(project_id) / "cache" / "uplift_rate" / f"{run_id}_{time_ma}.npy"
+
+    def subsidence_rate_array_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
+        return self.project_dir(project_id) / "cache" / "subsidence_rate" / f"{run_id}_{time_ma}.npy"
+
+    def volcanic_flux_array_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
+        return self.project_dir(project_id) / "cache" / "volcanic_flux" / f"{run_id}_{time_ma}.npy"
+
+    def erosion_capacity_array_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
+        return self.project_dir(project_id) / "cache" / "erosion_capacity" / f"{run_id}_{time_ma}.npy"
+
+    def orogenic_root_array_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
+        return self.project_dir(project_id) / "cache" / "orogenic_root" / f"{run_id}_{time_ma}.npy"
+
+    def craton_id_array_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
+        return self.project_dir(project_id) / "cache" / "craton_id" / f"{run_id}_{time_ma}.npy"
+
     def write_array(self, path: Path, arr: np.ndarray) -> Path:
         ensure_dir(path.parent)
         np.save(path, arr)
@@ -134,6 +159,9 @@ class ProjectStore:
 
     def run_diagnostics_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
         return self.run_dir(project_id, run_id) / "diagnostics" / f"{time_ma}.json"
+
+    def module_state_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
+        return self.run_dir(project_id, run_id) / "module_states" / f"{time_ma}.json"
 
     def write_run_diagnostics(self, project_id: str, run_id: str, time_ma: int, payload: dict[str, Any]) -> Path:
         path = self.run_diagnostics_path(project_id, run_id, time_ma)

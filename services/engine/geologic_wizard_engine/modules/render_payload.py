@@ -189,71 +189,253 @@ def _cell_bounds(col: int, row: int, width: int, height: int) -> tuple[float, fl
     return lon_min, lon_max, lat_min, lat_max
 
 
-def _build_landmask(frame: TimelineFrame) -> tuple[np.ndarray, np.ndarray] | None:
-    preview_path = Path(frame.previewHeightFieldRef) if frame.previewHeightFieldRef else None
-    if preview_path is None or not preview_path.exists():
+def _safe_load_array(ref: str | None) -> np.ndarray | None:
+    if not ref:
+        return None
+    path = Path(ref)
+    if not path.exists():
         return None
     try:
-        preview = np.load(preview_path)
+        arr = np.load(path)
+        if arr.ndim == 2:
+            return arr
+        squeezed = np.squeeze(arr)
+        if squeezed.ndim == 2:
+            return squeezed
     except Exception:
         return None
+    return None
 
-    crust = None
-    if frame.crustTypeFieldRef:
-        crust_path = Path(frame.crustTypeFieldRef)
-        if crust_path.exists():
-            try:
-                crust = np.load(crust_path)
-            except Exception:
-                crust = None
 
-    if crust is not None and crust.shape == preview.shape:
-        land = np.logical_or(crust > 0, preview >= 0.57)
+def _build_surface_bundle(frame: TimelineFrame) -> dict[str, Any] | None:
+    preview = _safe_load_array(frame.previewHeightFieldRef)
+    if preview is None:
+        return None
+
+    crust_type = _safe_load_array(frame.crustTypeFieldRef)
+    if crust_type is not None and crust_type.shape == preview.shape:
+        land = np.logical_or(crust_type > 0, preview >= 0.57)
     else:
         land = preview >= 0.53
 
-    stride = max(1, int(max(land.shape[0], land.shape[1]) / 240))
-    return land[::stride, ::stride], preview[::stride, ::stride]
+    stride = max(1, int(max(preview.shape[0], preview.shape[1]) / 240))
+
+    fields = {
+        "preview": preview,
+        "oceanic_age": _safe_load_array(frame.oceanicAgeFieldRef),
+        "crust_type": crust_type,
+        "crust_thickness": _safe_load_array(frame.crustThicknessFieldRef),
+        "tectonic_potential": _safe_load_array(frame.tectonicPotentialFieldRef),
+        "uplift_rate": _safe_load_array(frame.upliftRateFieldRef),
+        "subsidence_rate": _safe_load_array(frame.subsidenceRateFieldRef),
+        "volcanic_flux": _safe_load_array(frame.volcanicFluxFieldRef),
+        "erosion_capacity": _safe_load_array(frame.erosionCapacityFieldRef),
+        "orogenic_root": _safe_load_array(frame.orogenicRootFieldRef),
+        "craton_id": _safe_load_array(frame.cratonIdFieldRef),
+    }
+
+    downsampled: dict[str, np.ndarray | None] = {}
+    for name, arr in fields.items():
+        if arr is not None and arr.shape == preview.shape:
+            downsampled[name] = arr[::stride, ::stride]
+        else:
+            downsampled[name] = None
+
+    return {
+        "mask": land[::stride, ::stride],
+        "stride": stride,
+        "fields": downsampled,
+    }
 
 
-def _surface_landmass_features(mask: np.ndarray, relief: np.ndarray, frame: TimelineFrame) -> list[GeoJsonFeature]:
+def _connected_components(mask: np.ndarray) -> list[list[tuple[int, int]]]:
     height, width = mask.shape
-    features: list[GeoJsonFeature] = []
+    visited = np.zeros((height, width), dtype=np.uint8)
+    components: list[list[tuple[int, int]]] = []
 
     for row in range(height):
-        col = 0
-        while col < width:
-            while col < width and not bool(mask[row, col]):
-                col += 1
-            if col >= width:
-                break
-            run_start = col
-            while col < width and bool(mask[row, col]):
-                col += 1
-            run_end = col - 1
+        for col in range(width):
+            if not bool(mask[row, col]) or visited[row, col]:
+                continue
+            stack = [(col, row)]
+            visited[row, col] = 1
+            cells: list[tuple[int, int]] = []
+            while stack:
+                x, y = stack.pop()
+                cells.append((x, y))
+                for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                    if nx < 0 or nx >= width or ny < 0 or ny >= height:
+                        continue
+                    if visited[ny, nx] or not bool(mask[ny, nx]):
+                        continue
+                    visited[ny, nx] = 1
+                    stack.append((nx, ny))
+            components.append(cells)
 
-            lon_min, _, lat_min, lat_max = _cell_bounds(run_start, row, width, height)
-            _, lon_max, _, _ = _cell_bounds(run_end, row, width, height)
-            relief_window = relief[row, run_start : (run_end + 1)]
-            mean_relief = float(np.mean(relief_window)) if relief_window.size > 0 else 0.5
-            ring = [
-                [round(lon_min, 5), round(lat_min, 5)],
-                [round(lon_max, 5), round(lat_min, 5)],
-                [round(lon_max, 5), round(lat_max, 5)],
-                [round(lon_min, 5), round(lat_max, 5)],
-                [round(lon_min, 5), round(lat_min, 5)],
-            ]
-            features.append(
-                GeoJsonFeature(
-                    geometry={"type": "Polygon", "coordinates": [ring]},
-                    properties={
-                        "derived": "surface_mask",
-                        "relief": round(mean_relief, 4),
-                        "oceanicAgeP99Myr": frame.plateLifecycleState.oceanicAgeP99Myr if frame.plateLifecycleState else None,
-                        "supercontinentPhase": frame.plateLifecycleState.supercontinentPhase if frame.plateLifecycleState else None,
-                    },
-                )
+    return components
+
+
+def _grid_to_lon_lat(point: tuple[int, int], width: int, height: int) -> list[float]:
+    x, y = point
+    lon = -180.0 + (float(x) / float(width)) * 360.0
+    lat = 90.0 - (float(y) / float(height)) * 180.0
+    return [round(lon, 5), round(lat, 5)]
+
+
+def _simplify_grid_ring(points: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    if len(points) < 4:
+        return points
+    simplified: list[tuple[int, int]] = [points[0]]
+    for idx in range(1, len(points) - 1):
+        px, py = simplified[-1]
+        cx, cy = points[idx]
+        nx, ny = points[idx + 1]
+        if (px == cx == nx) or (py == cy == ny):
+            continue
+        simplified.append((cx, cy))
+    simplified.append(points[-1])
+    if simplified[0] != simplified[-1]:
+        simplified.append(simplified[0])
+    return simplified
+
+
+def _component_rings(cells: list[tuple[int, int]], width: int, height: int) -> list[list[list[float]]]:
+    edges: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+    for x, y in cells:
+        p0 = (x, y)
+        p1 = (x + 1, y)
+        p2 = (x + 1, y + 1)
+        p3 = (x, y + 1)
+        for edge in ((p0, p1), (p1, p2), (p2, p3), (p3, p0)):
+            rev = (edge[1], edge[0])
+            if rev in edges:
+                edges.remove(rev)
+            else:
+                edges.add(edge)
+
+    rings: list[list[list[float]]] = []
+    while edges:
+        start_edge = next(iter(edges))
+        edges.remove(start_edge)
+        ring: list[tuple[int, int]] = [start_edge[0], start_edge[1]]
+        current = start_edge[1]
+        start = start_edge[0]
+
+        while current != start:
+            next_edge: tuple[tuple[int, int], tuple[int, int]] | None = None
+            for candidate in edges:
+                if candidate[0] == current:
+                    next_edge = candidate
+                    break
+            if next_edge is None:
+                break
+            edges.remove(next_edge)
+            ring.append(next_edge[1])
+            current = next_edge[1]
+
+        if len(ring) < 4 or ring[0] != ring[-1]:
+            continue
+
+        simplified = _simplify_grid_ring(ring)
+        lonlat_ring = [_grid_to_lon_lat(point, width, height) for point in simplified]
+        lonlat_ring = _close_ring(_dedupe_consecutive(lonlat_ring))
+        if len(lonlat_ring) >= 4 and _ring_area(lonlat_ring) > 1e-6:
+            rings.append(lonlat_ring)
+
+    return rings
+
+
+def _ring_is_meaningful(ring: list[list[float]]) -> bool:
+    if len(ring) < 4:
+        return False
+    unique_lats = {round(point[1], 5) for point in ring[:-1]}
+    unique_lons = {round(point[0], 5) for point in ring[:-1]}
+    if len(unique_lats) <= 2 or len(unique_lons) <= 2:
+        return False
+    return _ring_area(ring) > 1e-4
+
+
+def _component_feature_properties(
+    cells: list[tuple[int, int]],
+    fields: dict[str, np.ndarray | None],
+    frame: TimelineFrame,
+    component_id: int,
+) -> dict[str, Any]:
+    xs = np.array([cell[0] for cell in cells], dtype=np.int32)
+    ys = np.array([cell[1] for cell in cells], dtype=np.int32)
+
+    props: dict[str, Any] = {
+        "derived": "surface_component",
+        "componentId": component_id,
+        "cellCount": len(cells),
+        "supercontinentPhase": frame.plateLifecycleState.supercontinentPhase if frame.plateLifecycleState else None,
+    }
+
+    preview = fields.get("preview")
+    if preview is not None:
+        vals = preview[ys, xs]
+        props["relief"] = round(float(np.mean(vals)), 4)
+
+    oceanic_age = fields.get("oceanic_age")
+    if oceanic_age is not None:
+        props["oceanicAgeMeanMyr"] = round(float(np.mean(oceanic_age[ys, xs])), 4)
+
+    crust_thickness = fields.get("crust_thickness")
+    if crust_thickness is not None:
+        props["crustThicknessMeanKm"] = round(float(np.mean(crust_thickness[ys, xs])), 4)
+
+    tectonic_potential = fields.get("tectonic_potential")
+    if tectonic_potential is not None:
+        props["tectonicPotentialMean"] = round(float(np.mean(tectonic_potential[ys, xs])), 4)
+
+    uplift_rate = fields.get("uplift_rate")
+    if uplift_rate is not None:
+        props["upliftMean"] = round(float(np.mean(uplift_rate[ys, xs])), 4)
+
+    subsidence_rate = fields.get("subsidence_rate")
+    if subsidence_rate is not None:
+        props["subsidenceMean"] = round(float(np.mean(subsidence_rate[ys, xs])), 4)
+
+    volcanic_flux = fields.get("volcanic_flux")
+    if volcanic_flux is not None:
+        props["volcanicFluxMean"] = round(float(np.mean(volcanic_flux[ys, xs])), 4)
+
+    craton_id = fields.get("craton_id")
+    if craton_id is not None:
+        props["cratonFraction"] = round(float(np.mean((craton_id[ys, xs] > 0).astype(np.float32))), 4)
+
+    return props
+
+
+def _surface_continent_features(
+    mask: np.ndarray,
+    fields: dict[str, np.ndarray | None],
+    frame: TimelineFrame,
+) -> list[GeoJsonFeature]:
+    height, width = mask.shape
+    features: list[GeoJsonFeature] = []
+    components = sorted(_connected_components(mask), key=len, reverse=True)
+
+    for component_id, cells in enumerate(components, start=1):
+        if len(cells) < 4:
+            continue
+        rings = _component_rings(cells, width, height)
+        polygons = [[ring] for ring in rings if _ring_is_meaningful(ring)]
+        if not polygons:
+            continue
+
+        geometry: dict[str, Any]
+        if len(polygons) == 1:
+            geometry = {"type": "Polygon", "coordinates": polygons[0]}
+        else:
+            geometry = {"type": "MultiPolygon", "coordinates": polygons}
+
+        features.append(
+            GeoJsonFeature(
+                geometry=wrap_polygon_geometry(geometry),
+                properties=_component_feature_properties(cells, fields, frame, component_id),
             )
+        )
 
     return features
 
@@ -302,6 +484,56 @@ def _surface_coastline_features(mask: np.ndarray) -> list[GeoJsonFeature]:
                 )
 
     return features
+
+
+def _surface_craton_features(craton_field: np.ndarray | None) -> list[GeoJsonFeature]:
+    if craton_field is None:
+        return []
+    craton_int = craton_field.astype(np.int32)
+    if not np.any(craton_int > 0):
+        return []
+
+    height, width = craton_int.shape
+    features: list[GeoJsonFeature] = []
+    for craton_id in sorted(int(value) for value in np.unique(craton_int) if int(value) > 0):
+        mask = craton_int == craton_id
+        for cells in _connected_components(mask):
+            if len(cells) < 4:
+                continue
+            rings = _component_rings(cells, width, height)
+            polygons = [[ring] for ring in rings if _ring_is_meaningful(ring)]
+            if not polygons:
+                continue
+            geometry: dict[str, Any]
+            if len(polygons) == 1:
+                geometry = {"type": "Polygon", "coordinates": polygons[0]}
+            else:
+                geometry = {"type": "MultiPolygon", "coordinates": polygons}
+            features.append(
+                GeoJsonFeature(
+                    geometry=wrap_polygon_geometry(geometry),
+                    properties={"derived": "craton_core", "cratonId": craton_id},
+                )
+            )
+
+    return features
+
+
+def _field_stats(fields: dict[str, np.ndarray | None]) -> dict[str, dict[str, float]]:
+    stats: dict[str, dict[str, float]] = {}
+    for name, arr in fields.items():
+        if arr is None:
+            continue
+        data = arr.astype(np.float32)
+        stats[name] = {
+            "min": float(np.min(data)),
+            "max": float(np.max(data)),
+            "p01": float(np.percentile(data, 1)),
+            "p99": float(np.percentile(data, 99)),
+            "mean": float(np.mean(data)),
+            "var": float(np.var(data)),
+        }
+    return stats
 
 
 def build_frame_render_payload(frame: TimelineFrame, *, source: str, nearest_time_ma: int) -> FrameRender:
@@ -385,13 +617,25 @@ def build_frame_render_payload(frame: TimelineFrame, *, source: str, nearest_tim
             )
         )
 
-    surface_bundle = _build_landmask(frame)
+    surface_bundle = _build_surface_bundle(frame)
+    continent_features: list[GeoJsonFeature] = []
+    craton_features: list[GeoJsonFeature] = []
+    field_stats: dict[str, dict[str, float]] = {}
     if surface_bundle is not None:
-        surface_mask, relief = surface_bundle
-        landmass_features = _surface_landmass_features(surface_mask, relief, frame)
+        surface_mask = surface_bundle["mask"]
+        fields = surface_bundle["fields"]
+        candidate_continents = _surface_continent_features(surface_mask, fields, frame)
+        if candidate_continents:
+            landmass_features = candidate_continents
+            continent_features = candidate_continents
+        else:
+            continent_features = landmass_features
         coastline_features = _surface_coastline_features(surface_mask)
+        craton_features = _surface_craton_features(fields.get("craton_id"))
+        field_stats = _field_stats(fields)
     else:
         coastline_features = []
+        continent_features = landmass_features
 
     active_belts_features = [
         feature
@@ -403,10 +647,13 @@ def build_frame_render_payload(frame: TimelineFrame, *, source: str, nearest_tim
     return FrameRender(
         timeMa=frame.timeMa,
         landmassGeoJson=GeoJsonFeatureCollection(features=landmass_features),
+        continentGeoJson=GeoJsonFeatureCollection(features=continent_features),
+        cratonGeoJson=GeoJsonFeatureCollection(features=craton_features),
         boundaryGeoJson=GeoJsonFeatureCollection(features=boundary_features),
         overlayGeoJson=GeoJsonFeatureCollection(features=overlay_features),
         coastlineGeoJson=GeoJsonFeatureCollection(features=coastline_features),
         activeBeltsGeoJson=GeoJsonFeatureCollection(features=active_belts_features),
+        fieldStats=field_stats,
         reliefFieldRef=frame.previewHeightFieldRef or None,
         source="cache" if source == "cache" else "generated",
         nearestTimeMa=nearest_time_ma,

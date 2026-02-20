@@ -83,7 +83,7 @@ def update_boundary_state(
     right_plate_is_continental: bool,
     step_myr: int,
     time_ma: int,
-) -> tuple[BoundaryStateV2, bool]:
+) -> tuple[BoundaryStateV2, bool, str | None]:
     boundary.average_oceanic_age_myr = average_oceanic_age_myr
     boundary.last_normal_velocity_cm_yr = normal_velocity_cm_yr
     boundary.last_tangential_velocity_cm_yr = tangential_velocity_cm_yr
@@ -117,9 +117,11 @@ def update_boundary_state(
         left_plate_is_continental=left_plate_is_continental,
         right_plate_is_continental=right_plate_is_continental,
     )
+    transition_reason: str | None = None
 
     if _required_persistence(current=boundary.state_class, candidate=candidate, boundary=boundary):
         if candidate != boundary.state_class:
+            previous_class = boundary.state_class.value
             previous_subducting_side = boundary.subducting_side
             boundary.state_class = candidate
             boundary.last_transition_ma = time_ma
@@ -135,6 +137,16 @@ def update_boundary_state(
 
             if previous_subducting_side != boundary.subducting_side and previous_subducting_side != "none":
                 boundary.polarity_flip_count += 1
+            transition_reason = (
+                f"{previous_class}->{candidate.value};"
+                f" n={round(normal_velocity_cm_yr,3)}"
+                f" t={round(tangential_velocity_cm_yr,3)}"
+                f" oceanAge={round(boundary.average_oceanic_age_myr,3)}"
+                f" divStreak={boundary.divergence_streak_myr}"
+                f" convStreak={boundary.convergence_streak_myr}"
+                f" trStreak={boundary.transform_streak_myr}"
+                f" collStreak={boundary.collision_streak_myr}"
+            )
         else:
             boundary.type_persistence_myr += step_myr
     else:
@@ -154,4 +166,4 @@ def update_boundary_state(
     if mismatch:
         boundary.motion_mismatch_count += 1
 
-    return boundary, mismatch
+    return boundary, mismatch, transition_reason

@@ -1,14 +1,17 @@
 import type {
   Bookmark,
   CoverageReport,
+  FieldSampleResponse,
   FrameDiagnostics,
   FrameRangeResponse,
   FrameSummary,
   JobSummary,
+  ModuleStateResponse,
   PlausibilityReport,
   ProjectConfig,
   ProjectSummary,
   QualityMode,
+  RunMetricsResponse,
   TimelineFrameRender,
   TimelineIndex,
   RigorProfile,
@@ -216,6 +219,27 @@ export async function getRenderFrameV2(
     options?.signal
   );
   return response.renderFrames[0];
+}
+
+export function getFrameFieldV2(
+  projectId: string,
+  timeMa: number,
+  fieldName: string,
+  maxDim = 256,
+  signal?: AbortSignal
+): Promise<FieldSampleResponse> {
+  return request<FieldSampleResponse>(
+    `/v2/projects/${projectId}/frames/${timeMa}/fields/${fieldName}?max_dim=${maxDim}`,
+    { signal }
+  );
+}
+
+export function getModuleStatesV2(projectId: string, timeMa: number, signal?: AbortSignal): Promise<ModuleStateResponse> {
+  return request<ModuleStateResponse>(`/v2/projects/${projectId}/frames/${timeMa}/module-states`, { signal });
+}
+
+export function getRunMetricsV2(projectId: string, runId: string, signal?: AbortSignal): Promise<RunMetricsResponse> {
+  return request<RunMetricsResponse>(`/v2/projects/${projectId}/runs/${runId}/metrics`, { signal });
 }
 
 export function getCoverage(projectId: string): Promise<CoverageReport> {

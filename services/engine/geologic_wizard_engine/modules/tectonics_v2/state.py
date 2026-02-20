@@ -50,6 +50,7 @@ class OceanicGridState:
     oceanic_age_myr: np.ndarray
     crust_thickness_km: np.ndarray
     tectonic_potential: np.ndarray
+    craton_id: np.ndarray
     terrain_height: np.ndarray
     uplift_rate: np.ndarray
     subsidence_rate: np.ndarray
@@ -101,3 +102,5 @@ class RunStateV2:
     seeds: Any | None = None
     pygplates: Any | None = None
     previous_frame_hash: str | None = None
+    last_step_snapshots: list[dict[str, Any]] = field(default_factory=list)
+    last_replay_hash: str = ""

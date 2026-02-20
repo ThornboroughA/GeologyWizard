@@ -18,16 +18,19 @@ from .models import (
     CoverageReport,
     ExpertEditRequest,
     ExportRequest,
+    FieldSampleResponse,
     FrameDiagnostics,
     FrameRangeResponse,
     FrameSummary,
     GenerateRequest,
     JobStatus,
     JobSummary,
+    ModuleStateResponse,
     PlausibilityReport,
     ProjectConfig,
     ProjectCreateRequest,
     ProjectSummary,
+    RunMetricsResponse,
     SolverVersion,
     TimelineIndex,
     ValidationReport,
@@ -276,6 +279,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="project not found")
         try:
             return simulation.get_frame_diagnostics(project_id, time_ma)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/v2/projects/{project_id}/frames/{time_ma}/fields/{field_name}", response_model=FieldSampleResponse)
+    def get_frame_field_v2(
+        project_id: str,
+        time_ma: int,
+        field_name: str,
+        max_dim: int = Query(256, ge=32, le=1024),
+    ) -> FieldSampleResponse:
+        project = metadata.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        try:
+            return simulation.get_field_sample(project_id, time_ma, field_name, max_dim=max_dim)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/v2/projects/{project_id}/frames/{time_ma}/module-states", response_model=ModuleStateResponse)
+    def get_module_states_v2(project_id: str, time_ma: int) -> ModuleStateResponse:
+        project = metadata.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        try:
+            return simulation.get_module_state(project_id, time_ma)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/v2/projects/{project_id}/runs/{run_id}/metrics", response_model=RunMetricsResponse)
+    def get_run_metrics_v2(project_id: str, run_id: str) -> RunMetricsResponse:
+        project = metadata.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        try:
+            return simulation.get_run_metrics(project_id, run_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

@@ -48,6 +48,13 @@ class BackendFrameResultV2:
     crust_type_field: np.ndarray
     crust_thickness_field: np.ndarray
     tectonic_potential_field: np.ndarray
+    uplift_rate_field: np.ndarray
+    subsidence_rate_field: np.ndarray
+    volcanic_flux_field: np.ndarray
+    erosion_capacity_field: np.ndarray
+    orogenic_root_field: np.ndarray
+    craton_id_field: np.ndarray
+    module_state_payload: dict[str, Any]
     plausibility_checks: list[PlausibilityCheck]
 
 
@@ -208,6 +215,23 @@ def _build_strain_field(boundaries: list[BoundarySegment], kinematics: list[Boun
     if max_value > 0:
         field /= max_value
     return field.astype(np.float32)
+
+
+def _snapshot_step(
+    *,
+    step_id: str,
+    inputs: Any,
+    outputs: Any,
+    key_metrics: dict[str, float],
+    transition_reasons: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "stepId": step_id,
+        "inputDigest": stable_hash(inputs),
+        "outputDigest": stable_hash(outputs),
+        "keyMetrics": key_metrics,
+        "transitionReasons": transition_reasons or [],
+    }
 
 
 def _build_plausibility_checks(
@@ -491,6 +515,8 @@ class TectonicStateV2Backend:
         edits: list[dict],
     ) -> BackendFrameResultV2:
         assert state.oceanic is not None
+        step_snapshots: list[dict[str, Any]] = []
+        transition_reasons: list[str] = []
 
         plate_features: list[PlateFeature] = []
         plate_kinematics: list[PlateKinematics] = []
@@ -550,7 +576,8 @@ class TectonicStateV2Backend:
                     type_persistence_myr=config.timeIncrementMyr,
                 )
 
-            boundary_state, mismatch = update_boundary_state(
+            previous_state_class = boundary_state.state_class.value
+            boundary_state, mismatch, transition_reason = update_boundary_state(
                 boundary=boundary_state,
                 normal_velocity_cm_yr=normal_velocity,
                 tangential_velocity_cm_yr=tangential_velocity,
@@ -562,6 +589,10 @@ class TectonicStateV2Backend:
                 time_ma=time_ma,
             )
             boundary_state = _apply_boundary_edits(boundary_state, local_edits)
+            if transition_reason:
+                transition_reasons.append(f"{seg_id}:{transition_reason}")
+            if previous_state_class != boundary_state.state_class.value and not transition_reason:
+                transition_reasons.append(f"{seg_id}:{previous_state_class}->{boundary_state.state_class.value};manual_or_post_edit")
             state.boundaries[seg_id] = boundary_state
 
             boundary_type = _map_state_class_to_boundary_type(boundary_state.state_class)
@@ -618,12 +649,68 @@ class TectonicStateV2Backend:
             if mismatch:
                 boundary_motion_mismatch_count += 1
 
+        step_snapshots.append(
+            _snapshot_step(
+                step_id="kinematics_step",
+                inputs={
+                    "timeMa": time_ma,
+                    "plateCount": len(state.plate_states),
+                    "boundaryPairCount": len(boundary_midpoints),
+                },
+                outputs=[
+                    {
+                        "plateId": plate.plate_id,
+                        "velocityCmYr": round(float(plate.velocity_cm_yr), 4),
+                        "azimuthDeg": round(float(plate.azimuth_deg), 4),
+                    }
+                    for plate in state.plate_states
+                ],
+                key_metrics={
+                    "plate_count": float(len(state.plate_states)),
+                    "boundary_pair_count": float(len(boundary_midpoints)),
+                },
+            )
+        )
+        step_snapshots.append(
+            _snapshot_step(
+                step_id="boundary_semantics_step",
+                inputs={
+                    "boundaryCount": len(boundary_midpoints),
+                    "localEditCount": len(local_edits),
+                },
+                outputs=[item.model_dump(mode="json") for item in boundary_state_records],
+                key_metrics={
+                    "motion_mismatch_count": float(boundary_motion_mismatch_count),
+                    "polarity_flip_count": float(sum(item.polarityFlipCount for item in boundary_state_records)),
+                    "transition_count": float(sum(item.transitionCount for item in boundary_state_records)),
+                },
+                transition_reasons=transition_reasons[:160],
+            )
+        )
+
         lifecycle = update_oceanic_grid(
             grid=state.oceanic,
             boundary_states=list(state.boundaries.values()),
             boundary_midpoints=boundary_midpoints,
             step_myr=config.timeIncrementMyr,
             seed=config.seed,
+        )
+        step_snapshots.append(
+            _snapshot_step(
+                step_id="lithosphere_step",
+                inputs={
+                    "boundaryStatesDigest": stable_hash([item.model_dump(mode="json") for item in boundary_state_records]),
+                },
+                outputs={
+                    "crustTypeShape": list(state.oceanic.crust_type.shape),
+                    "oceanicAgeP99Myr": lifecycle.oceanic_age_p99_myr,
+                    "subductionFluxTotal": lifecycle.subduction_flux_total,
+                },
+                key_metrics={
+                    "oceanic_age_p99_myr": float(lifecycle.oceanic_age_p99_myr),
+                    "subduction_flux_total": float(lifecycle.subduction_flux_total),
+                },
+            )
         )
 
         state.supercontinent = update_supercontinent_state(
@@ -642,6 +729,21 @@ class TectonicStateV2Backend:
         )
 
         events: list[GeoEvent] = event_result.events
+        step_snapshots.append(
+            _snapshot_step(
+                step_id="events_step",
+                inputs={
+                    "boundaryDigest": stable_hash([item.model_dump(mode="json") for item in boundary_state_records]),
+                    "ledgerSize": len(state.events),
+                },
+                outputs=[item.model_dump(mode="json") for item in events],
+                key_metrics={
+                    "event_count": float(len(events)),
+                    "short_lived_orogeny_count": float(event_result.short_lived_orogeny_count),
+                    "uncoupled_volcanic_belts": float(event_result.uncoupled_volcanic_belts),
+                },
+            )
+        )
 
         # Expert event gain overrides remain deterministic and window-scoped.
         event_gain = 1.0
@@ -696,6 +798,25 @@ class TectonicStateV2Backend:
             terrain=round(min(1.0, t_u + (0.04 if lifecycle.oceanic_age_p99_myr > 280 else 0.0)), 4),
             coverage=round(1.0 - combined_coverage, 4),
         )
+        step_snapshots.append(
+            _snapshot_step(
+                step_id="surface_response_step",
+                inputs={
+                    "eventCount": len(events),
+                    "lifecycleDigest": stable_hash(lifecycle.__dict__),
+                },
+                outputs={
+                    "terrainShape": list(state.oceanic.terrain_height.shape),
+                    "terrainMean": float(np.mean(state.oceanic.terrain_height)),
+                    "tectonicPotentialMean": float(np.mean(state.oceanic.tectonic_potential)),
+                },
+                key_metrics={
+                    "terrain_mean": float(np.mean(state.oceanic.terrain_height)),
+                    "tectonic_potential_mean": float(np.mean(state.oceanic.tectonic_potential)),
+                    "coverage": float(1.0 - uncertainty.coverage),
+                },
+            )
+        )
 
         lifecycle_state = PlateLifecycleState(
             unexplainedPlateBirths=lifecycle.unexplained_plate_births,
@@ -709,6 +830,21 @@ class TectonicStateV2Backend:
             supercontinentCycleCount=state.supercontinent.cycle_count,
             shortLivedOrogenyCount=event_result.short_lived_orogeny_count,
             uncoupledVolcanicBelts=event_result.uncoupled_volcanic_belts,
+        )
+        step_snapshots.append(
+            _snapshot_step(
+                step_id="lifecycle_step",
+                inputs={
+                    "continentalFraction": lifecycle.continental_area_fraction,
+                    "oceanicFraction": lifecycle.oceanic_area_fraction,
+                },
+                outputs=lifecycle_state.model_dump(mode="json"),
+                key_metrics={
+                    "net_area_balance_error": float(lifecycle.net_area_balance_error),
+                    "continental_fraction": float(lifecycle.continental_area_fraction),
+                    "oceanic_fraction": float(lifecycle.oceanic_area_fraction),
+                },
+            )
         )
 
         frame = TimelineFrame(
@@ -725,6 +861,13 @@ class TectonicStateV2Backend:
             crustTypeFieldRef=None,
             crustThicknessFieldRef=None,
             tectonicPotentialFieldRef=None,
+            upliftRateFieldRef=None,
+            subsidenceRateFieldRef=None,
+            volcanicFluxFieldRef=None,
+            erosionCapacityFieldRef=None,
+            orogenicRootFieldRef=None,
+            cratonIdFieldRef=None,
+            moduleStateRef=None,
             uncertaintySummary=uncertainty,
             previewHeightFieldRef="",
         )
@@ -790,8 +933,55 @@ class TectonicStateV2Backend:
             checkIds=[item.checkId for item in checks],
         )
         diagnostics.warnings = [warning for warning in diagnostics.warnings if warning]
+        step_snapshots.append(
+            _snapshot_step(
+                step_id="diagnostics_step",
+                inputs={
+                    "coverageRatio": combined_coverage,
+                    "checkCount": len(checks),
+                },
+                outputs={
+                    "metrics": diagnostics.metrics,
+                    "warningCount": len(diagnostics.warnings),
+                },
+                key_metrics={
+                    "error_like_motion_mismatch": float(boundary_motion_mismatch_count),
+                    "warning_count": float(len(diagnostics.warnings)),
+                    "check_count": float(len(checks)),
+                },
+            )
+        )
 
         strain_field = _build_strain_field(boundaries, boundary_kinematics)
+        step_snapshots.append(
+            _snapshot_step(
+                step_id="render_geometry_step",
+                inputs={
+                    "strainShape": list(strain_field.shape),
+                    "boundaryCount": len(boundaries),
+                    "eventCount": len(events),
+                },
+                outputs={
+                    "plateGeometryCount": len(plate_features),
+                    "boundaryGeometryCount": len(boundaries),
+                    "eventOverlayCount": len(events),
+                },
+                key_metrics={
+                    "plate_geometry_count": float(len(plate_features)),
+                    "boundary_geometry_count": float(len(boundaries)),
+                    "event_overlay_count": float(len(events)),
+                },
+            )
+        )
+
+        replay_hash = stable_hash([snapshot["outputDigest"] for snapshot in step_snapshots])
+        state.last_step_snapshots = step_snapshots
+        state.last_replay_hash = replay_hash
+        module_state_payload = {
+            "timeMa": time_ma,
+            "replayHash": replay_hash,
+            "steps": step_snapshots,
+        }
 
         return BackendFrameResultV2(
             frame=frame,
@@ -806,6 +996,13 @@ class TectonicStateV2Backend:
             crust_type_field=state.oceanic.crust_type.astype(np.uint8),
             crust_thickness_field=state.oceanic.crust_thickness_km.astype(np.float32),
             tectonic_potential_field=state.oceanic.tectonic_potential.astype(np.float32),
+            uplift_rate_field=state.oceanic.uplift_rate.astype(np.float32),
+            subsidence_rate_field=state.oceanic.subsidence_rate.astype(np.float32),
+            volcanic_flux_field=state.oceanic.volcanic_flux.astype(np.float32),
+            erosion_capacity_field=state.oceanic.erosion_capacity.astype(np.float32),
+            orogenic_root_field=state.oceanic.orogenic_root.astype(np.float32),
+            craton_id_field=state.oceanic.craton_id.astype(np.int32),
+            module_state_payload=module_state_payload,
             plausibility_checks=checks,
         )
 

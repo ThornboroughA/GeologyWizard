@@ -97,7 +97,7 @@ def test_boundary_state_machine_thresholds():
     boundary = BoundaryStateV2(segment_id="seg_1_2", left_plate_id=1, right_plate_id=2)
 
     for time_ma in range(100, 92, -1):
-        boundary, _ = update_boundary_state(
+        boundary, _, _ = update_boundary_state(
             boundary=boundary,
             normal_velocity_cm_yr=0.8,
             tangential_velocity_cm_yr=0.3,
@@ -111,7 +111,7 @@ def test_boundary_state_machine_thresholds():
     assert boundary.state_class in {BoundaryStateClass.rift, BoundaryStateClass.ridge}
 
     for time_ma in range(92, 87, -1):
-        boundary, _ = update_boundary_state(
+        boundary, _, _ = update_boundary_state(
             boundary=boundary,
             normal_velocity_cm_yr=-1.4,
             tangential_velocity_cm_yr=0.2,
@@ -125,7 +125,7 @@ def test_boundary_state_machine_thresholds():
     assert boundary.state_class == BoundaryStateClass.subduction
 
     for time_ma in range(87, 83, -1):
-        boundary, _ = update_boundary_state(
+        boundary, _, _ = update_boundary_state(
             boundary=boundary,
             normal_velocity_cm_yr=-0.9,
             tangential_velocity_cm_yr=0.3,
@@ -312,3 +312,44 @@ def test_render_payload_includes_coastline_and_active_belts(tmp_path):
     payload = render_frame.json()["renderFrames"][0]
     assert "coastlineGeoJson" in payload
     assert "activeBeltsGeoJson" in payload
+    assert "continentGeoJson" in payload
+    assert "cratonGeoJson" in payload
+    assert "fieldStats" in payload
+
+    continent_features = payload["continentGeoJson"]["features"]
+    assert continent_features
+    one_row_like = 0
+    for feature in continent_features:
+        geometry = feature["geometry"]
+        if geometry["type"] == "Polygon":
+            rings = [geometry["coordinates"][0]]
+        else:
+            rings = [poly[0] for poly in geometry["coordinates"]]
+        for ring in rings:
+            lats = sorted({round(point[1], 5) for point in ring[:-1]})
+            if len(lats) == 2:
+                one_row_like += 1
+    assert (one_row_like / max(1, len(continent_features))) <= 0.05
+
+    field = client.get(f"/v2/projects/{project['projectId']}/frames/40/fields/oceanic_age", params={"max_dim": 128})
+    field.raise_for_status()
+    field_payload = field.json()
+    assert field_payload["fieldName"] == "oceanic_age"
+    assert field_payload["stats"]["var"] > 0
+
+    module_states = client.get(f"/v2/projects/{project['projectId']}/frames/40/module-states")
+    module_states.raise_for_status()
+    module_payload = module_states.json()
+    assert module_payload["replayHash"]
+    assert len(module_payload["steps"]) >= 4
+
+    project_latest = client.get(f"/v2/projects/{project['projectId']}")
+    project_latest.raise_for_status()
+    run_id = project_latest.json()["currentRunId"]
+    assert run_id is not None
+
+    run_metrics = client.get(f"/v2/projects/{project['projectId']}/runs/{run_id}/metrics")
+    run_metrics.raise_for_status()
+    metrics_payload = run_metrics.json()
+    assert metrics_payload["frameCount"] > 0
+    assert "coverage" in metrics_payload

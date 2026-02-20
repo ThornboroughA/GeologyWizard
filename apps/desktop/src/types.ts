@@ -158,6 +158,13 @@ export interface TimelineFrame {
   crustTypeFieldRef?: string | null;
   crustThicknessFieldRef?: string | null;
   tectonicPotentialFieldRef?: string | null;
+  upliftRateFieldRef?: string | null;
+  subsidenceRateFieldRef?: string | null;
+  volcanicFluxFieldRef?: string | null;
+  erosionCapacityFieldRef?: string | null;
+  orogenicRootFieldRef?: string | null;
+  cratonIdFieldRef?: string | null;
+  moduleStateRef?: string | null;
   uncertaintySummary: UncertaintySummary;
   previewHeightFieldRef: string;
 }
@@ -184,10 +191,13 @@ export interface GeoJsonFeatureCollection {
 export interface TimelineFrameRender {
   timeMa: number;
   landmassGeoJson: GeoJsonFeatureCollection;
+  continentGeoJson?: GeoJsonFeatureCollection;
+  cratonGeoJson?: GeoJsonFeatureCollection;
   boundaryGeoJson: GeoJsonFeatureCollection;
   overlayGeoJson: GeoJsonFeatureCollection;
   coastlineGeoJson?: GeoJsonFeatureCollection;
   activeBeltsGeoJson?: GeoJsonFeatureCollection;
+  fieldStats?: Record<string, Record<string, number>>;
   reliefFieldRef?: string | null;
   source: "cache" | "generated";
   nearestTimeMa: number;
@@ -302,4 +312,41 @@ export interface PlausibilityReport {
   checkedAt: string;
   checks: PlausibilityCheck[];
   summary: Record<string, number>;
+}
+
+export interface FieldSampleResponse {
+  projectId: string;
+  runId: string;
+  timeMa: number;
+  fieldName: string;
+  width: number;
+  height: number;
+  sourceRef: string;
+  stats: Record<string, number>;
+  data: number[][];
+}
+
+export interface ModuleStepSnapshot {
+  stepId: string;
+  inputDigest: string;
+  outputDigest: string;
+  keyMetrics: Record<string, number>;
+  transitionReasons: string[];
+}
+
+export interface ModuleStateResponse {
+  projectId: string;
+  runId: string;
+  timeMa: number;
+  replayHash: string;
+  steps: ModuleStepSnapshot[];
+}
+
+export interface RunMetricsResponse {
+  projectId: string;
+  runId: string;
+  frameCount: number;
+  coverage: Record<string, number>;
+  diagnostics: Record<string, number>;
+  plausibility: Record<string, number>;
 }

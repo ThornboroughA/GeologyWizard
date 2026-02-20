@@ -114,12 +114,18 @@ def initialize_oceanic_grid(
     ).astype(np.float32)
 
     continental_signal = np.zeros((height, width), dtype=np.float32)
+    craton_id = np.zeros((height, width), dtype=np.int32)
     for idx, plate in enumerate([p for p in plate_states if p.is_continental]):
         plon = math.radians(plate.lon)
         plat = math.radians(plate.lat)
         sigma = math.radians(max(8.0, plate.radius_deg * 0.75 + (idx % 3) * 1.5))
         signal = np.exp(-(((lon_grid - plon) ** 2) + ((lat_grid - plat) ** 2)) / (2.0 * sigma * sigma))
         continental_signal += signal.astype(np.float32)
+
+        # Persistent craton seeds remain visible and can be reused by later inheritance logic.
+        craton_sigma = math.radians(max(2.0, plate.radius_deg * max(0.16, plate.craton_factor * 0.32)))
+        craton_signal = np.exp(-(((lon_grid - plon) ** 2) + ((lat_grid - plat) ** 2)) / (2.0 * craton_sigma * craton_sigma))
+        craton_id[craton_signal >= 0.64] = int(plate.plate_id)
 
     crust_type[continental_signal >= 0.32] = CONTINENTAL
     oceanic_age[crust_type == CONTINENTAL] = 0.0
@@ -150,6 +156,7 @@ def initialize_oceanic_grid(
         oceanic_age_myr=oceanic_age,
         crust_thickness_km=crust_thickness,
         tectonic_potential=tectonic_potential,
+        craton_id=craton_id,
         terrain_height=terrain_height,
         uplift_rate=uplift_rate,
         subsidence_rate=subsidence_rate,

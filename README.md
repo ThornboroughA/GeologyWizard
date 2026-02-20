@@ -21,6 +21,10 @@ Geologic Wizard is a desktop-first tectonic worldbuilding tool for non-experts. 
   - `GET /v1/projects/{projectId}/frames/{timeMa}/diagnostics`
   - `GET /v1/projects/{projectId}/coverage`
   - `GET /v2/projects/{projectId}/plausibility`
+- New diagnosability endpoints:
+  - `GET /v2/projects/{projectId}/frames/{timeMa}/fields/{fieldName}`
+  - `GET /v2/projects/{projectId}/frames/{timeMa}/module-states`
+  - `GET /v2/projects/{projectId}/runs/{runId}/metrics`
 
 ## Agent reference
 
@@ -86,6 +90,9 @@ npm run tauri:dev
 - `GET /v1/projects/{projectId}/coverage`
 - `GET /v2/projects/{projectId}/timeline-index`
 - `GET /v2/projects/{projectId}/plausibility`
+- `GET /v2/projects/{projectId}/frames/{timeMa}/fields/{fieldName}`
+- `GET /v2/projects/{projectId}/frames/{timeMa}/module-states`
+- `GET /v2/projects/{projectId}/runs/{runId}/metrics`
 - `POST /v1/projects/{projectId}/bookmarks`
 - `POST /v1/projects/{projectId}/bookmarks/{bookmarkId}/refine`
 - `POST /v1/projects/{projectId}/edits`
@@ -116,4 +123,5 @@ npm run tauri:dev
 - `/Users/xander/Documents/Fantasy/Geologic_Wizard/apps/desktop` React + Tauri client
 - `/Users/xander/Documents/Fantasy/Geologic_Wizard/services/engine` FastAPI simulation/export engine
 - `/Users/xander/Documents/Fantasy/Geologic_Wizard/docs/architecture.md` module-level architecture
+- `/Users/xander/Documents/Fantasy/Geologic_Wizard/docs/tectonics_bible.md` phased tectonic design record
 - `/Users/xander/Documents/Fantasy/Geologic_Wizard/scripts/dev.sh` unified startup script

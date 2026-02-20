@@ -214,6 +214,13 @@ class TimelineFrame(BaseModel):
     crustTypeFieldRef: str | None = None
     crustThicknessFieldRef: str | None = None
     tectonicPotentialFieldRef: str | None = None
+    upliftRateFieldRef: str | None = None
+    subsidenceRateFieldRef: str | None = None
+    volcanicFluxFieldRef: str | None = None
+    erosionCapacityFieldRef: str | None = None
+    orogenicRootFieldRef: str | None = None
+    cratonIdFieldRef: str | None = None
+    moduleStateRef: str | None = None
     uncertaintySummary: UncertaintySummary
     previewHeightFieldRef: str
 
@@ -393,10 +400,13 @@ class TimelineIndex(BaseModel):
 class FrameRender(BaseModel):
     timeMa: int
     landmassGeoJson: GeoJsonFeatureCollection
+    continentGeoJson: GeoJsonFeatureCollection = Field(default_factory=GeoJsonFeatureCollection)
+    cratonGeoJson: GeoJsonFeatureCollection = Field(default_factory=GeoJsonFeatureCollection)
     boundaryGeoJson: GeoJsonFeatureCollection
     overlayGeoJson: GeoJsonFeatureCollection
     coastlineGeoJson: GeoJsonFeatureCollection = Field(default_factory=GeoJsonFeatureCollection)
     activeBeltsGeoJson: GeoJsonFeatureCollection = Field(default_factory=GeoJsonFeatureCollection)
+    fieldStats: dict[str, dict[str, float]] = Field(default_factory=dict)
     reliefFieldRef: str | None = None
     source: Literal["cache", "generated"]
     nearestTimeMa: int
@@ -468,3 +478,40 @@ class RefineResult(BaseModel):
 class ExportResult(BaseModel):
     artifacts: list[ExportArtifact]
     provenance: ProvenanceRecord
+
+
+class FieldSampleResponse(BaseModel):
+    projectId: str
+    runId: str
+    timeMa: int
+    fieldName: str
+    width: int
+    height: int
+    sourceRef: str
+    stats: dict[str, float]
+    data: list[list[float]]
+
+
+class ModuleStepSnapshot(BaseModel):
+    stepId: str
+    inputDigest: str
+    outputDigest: str
+    keyMetrics: dict[str, float] = Field(default_factory=dict)
+    transitionReasons: list[str] = Field(default_factory=list)
+
+
+class ModuleStateResponse(BaseModel):
+    projectId: str
+    runId: str
+    timeMa: int
+    replayHash: str
+    steps: list[ModuleStepSnapshot] = Field(default_factory=list)
+
+
+class RunMetricsResponse(BaseModel):
+    projectId: str
+    runId: str
+    frameCount: int
+    coverage: dict[str, float]
+    diagnostics: dict[str, float]
+    plausibility: dict[str, int]

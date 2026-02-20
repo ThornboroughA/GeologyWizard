@@ -98,7 +98,7 @@ export default function App() {
   const [selectedBookmarkId, setSelectedBookmarkId] = useState<string>("");
   const [viewMode, setViewMode] = useState<"2d" | "3d">("2d");
   const [overlay, setOverlay] = useState<
-    "none" | "velocity" | "boundary_class" | "event_confidence" | "uplift" | "subsidence" | "boundary_state" | "crust_age" | "orogeny_phase" | "subduction_flux"
+    "none" | "velocity" | "boundary_class" | "event_confidence" | "uplift" | "subsidence" | "boundary_state" | "crust_age" | "craton" | "orogeny_phase" | "subduction_flux"
   >("none");
   const [status, setStatus] = useState("Ready");
   const [error, setError] = useState<string | null>(null);
@@ -457,7 +457,7 @@ export default function App() {
       : "Full mode: reuses quick macro history with higher-fidelity surface realization.";
 
   const mapSummary = renderFrame
-    ? `${renderFrame.coastlineGeoJson?.features.length ?? 0} coastline segments, ${renderFrame.activeBeltsGeoJson?.features.length ?? renderFrame.boundaryGeoJson.features.length} active belts, ${renderFrame.overlayGeoJson.features.length} overlays`
+    ? `${renderFrame.continentGeoJson?.features.length ?? renderFrame.landmassGeoJson.features.length} continents, ${renderFrame.coastlineGeoJson?.features.length ?? 0} coastline segments, ${renderFrame.cratonGeoJson?.features.length ?? 0} craton cores, ${renderFrame.activeBeltsGeoJson?.features.length ?? renderFrame.boundaryGeoJson.features.length} active belts`
     : "No frame loaded";
 
   return (
@@ -684,6 +684,7 @@ export default function App() {
                 <option value="subsidence">subsidence</option>
                 <option value="boundary_state">boundary_state</option>
                 <option value="crust_age">crust_age</option>
+                <option value="craton">craton</option>
                 <option value="orogeny_phase">orogeny_phase</option>
                 <option value="subduction_flux">subduction_flux</option>
               </select>

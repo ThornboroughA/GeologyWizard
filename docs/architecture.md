@@ -16,6 +16,7 @@
 - Persistent boundary classes: `ridge`, `rift`, `transform`, `subduction`, `collision`, `passive_margin`, `suture`.
 - Oceanic crust age/recycling grids + terrain-memory coupling.
 - Supercontinent clustering diagnostics + structured plausibility checks.
+- Per-frame module snapshots with input/output digests and replay hash.
 
 3. `PyGPlates adapter` (`services/engine/geologic_wizard_engine/modules/pygplates_adapter.py`)
 - Optional runtime binding.
@@ -45,6 +46,9 @@
 - `GET /v2/projects/{projectId}/frames/{timeMa}`
 - `GET /v2/projects/{projectId}/frames/{timeMa}/diagnostics`
 - `GET /v2/projects/{projectId}/plausibility`
+- `GET /v2/projects/{projectId}/frames/{timeMa}/fields/{fieldName}`
+- `GET /v2/projects/{projectId}/frames/{timeMa}/module-states`
+- `GET /v2/projects/{projectId}/runs/{runId}/metrics`
 - Generation overrides via `POST /v1/projects/{projectId}/generate`:
   - `simulationModeOverride`
   - `rigorProfileOverride`
@@ -55,5 +59,6 @@
 1. Create project -> persist config and initialize cache layout.
 2. Generate run -> backend evolves plate states through time and caches keyframes.
 3. Frame request -> read keyframe cache or deterministically replay to target time.
-4. Bookmark refinement -> strain-aware regional upres with global tectonic context frozen at bookmark time.
-5. Export -> 8K-ready heightmap + metadata provenance (solver/profile/kinematics/uncertainty digests).
+4. Module-state request -> retrieve persisted step snapshots + replay hash for frame-level diagnostics.
+5. Bookmark refinement -> strain-aware regional upres with global tectonic context frozen at bookmark time.
+6. Export -> 8K-ready heightmap + metadata provenance (solver/profile/kinematics/uncertainty digests).

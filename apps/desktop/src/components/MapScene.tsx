@@ -18,6 +18,7 @@ interface MapSceneProps {
     | "subsidence"
     | "boundary_state"
     | "crust_age"
+    | "craton"
     | "orogeny_phase"
     | "subduction_flux";
 }
@@ -63,12 +64,24 @@ function plateFillColor(properties: Record<string, unknown>, overlay: MapScenePr
   }
 
   if (overlay === "crust_age") {
-    const oceanicAgeP99Myr = Number(properties.oceanicAgeP99Myr ?? 0);
-    const normalized = Math.max(0, Math.min(1, oceanicAgeP99Myr / 320));
+    const oceanicAgeMeanMyr = Number(properties.oceanicAgeMeanMyr ?? properties.oceanicAgeP99Myr ?? 0);
+    const normalized = Math.max(0, Math.min(1, oceanicAgeMeanMyr / 320));
     const r = Math.round(90 + normalized * 120);
     const g = Math.round(170 - normalized * 95);
     const b = Math.round(205 - normalized * 110);
     return [r, g, b, 185];
+  }
+
+  if (overlay === "uplift") {
+    const uplift = Number(properties.upliftMean ?? properties.tectonicPotentialMean ?? 0);
+    const normalized = Math.max(0, Math.min(1, uplift));
+    return [Math.round(170 + normalized * 70), Math.round(120 + normalized * 85), 92, 190];
+  }
+
+  if (overlay === "subsidence") {
+    const subsidence = Number(properties.subsidenceMean ?? 0);
+    const normalized = Math.max(0, Math.min(1, subsidence));
+    return [84, Math.round(120 + normalized * 72), Math.round(170 + normalized * 70), 188];
   }
 
   const base = (plateId * 37) % 255;
@@ -154,6 +167,8 @@ export function MapScene({ frame, mode, overlay }: MapSceneProps) {
     source: "cache" as const,
     nearestTimeMa: 0,
     landmassGeoJson: { type: "FeatureCollection" as const, features: [] },
+    continentGeoJson: { type: "FeatureCollection" as const, features: [] },
+    cratonGeoJson: { type: "FeatureCollection" as const, features: [] },
     boundaryGeoJson: { type: "FeatureCollection" as const, features: [] },
     overlayGeoJson: { type: "FeatureCollection" as const, features: [] },
     coastlineGeoJson: { type: "FeatureCollection" as const, features: [] },
@@ -163,7 +178,10 @@ export function MapScene({ frame, mode, overlay }: MapSceneProps) {
 
   const layers = useMemo(
     () => {
-      const landData = effectiveFrame.landmassGeoJson;
+      const landData =
+        effectiveFrame.continentGeoJson && effectiveFrame.continentGeoJson.features.length > 0
+          ? effectiveFrame.continentGeoJson
+          : effectiveFrame.landmassGeoJson;
       const boundaryData =
         effectiveFrame.activeBeltsGeoJson && effectiveFrame.activeBeltsGeoJson.features.length > 0
           ? effectiveFrame.activeBeltsGeoJson
@@ -178,7 +196,7 @@ export function MapScene({ frame, mode, overlay }: MapSceneProps) {
         wrapLongitude: true,
         lineWidthMinPixels: 1,
         getFillColor: (feature: { properties: Record<string, unknown> }) => plateFillColor(feature.properties, overlay),
-        getLineColor: [232, 244, 252, 160]
+        getLineColor: [225, 236, 244, 146]
       }),
       new GeoJsonLayer({
         id: "coastlines",
@@ -188,6 +206,16 @@ export function MapScene({ frame, mode, overlay }: MapSceneProps) {
         wrapLongitude: true,
         lineWidthMinPixels: 1.2,
         getLineColor: [218, 238, 248, 160]
+      }),
+      new GeoJsonLayer({
+        id: "cratons",
+        data: effectiveFrame.cratonGeoJson ?? { type: "FeatureCollection", features: [] },
+        filled: overlay === "craton",
+        stroked: true,
+        wrapLongitude: true,
+        lineWidthMinPixels: overlay === "craton" ? 2.0 : 1.4,
+        getFillColor: [248, 233, 162, 65],
+        getLineColor: overlay === "craton" ? [255, 226, 128, 245] : [248, 233, 162, 190]
       }),
       new GeoJsonLayer({
         id: "boundaries",

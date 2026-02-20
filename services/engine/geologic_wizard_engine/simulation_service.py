@@ -17,10 +17,12 @@ from .models import (
     ExportArtifact,
     ExportRequest,
     ExportResult,
+    FieldSampleResponse,
     FrameDiagnostics,
     FrameRangeResponse,
     FrameRender,
     FrameSummary,
+    ModuleStateResponse,
     PlausibilityCheck,
     PlausibilityReport,
     ProjectConfig,
@@ -28,6 +30,7 @@ from .models import (
     ProvenanceRecord,
     QualityMode,
     RefineResult,
+    RunMetricsResponse,
     SolverVersion,
     TimelineIndex,
     TimelineIndexHashEntry,
@@ -315,16 +318,40 @@ class SimulationService:
         crust_type_path = self.project_store.crust_type_array_path(project_id, run_id, time_ma)
         crust_thickness_path = self.project_store.crust_thickness_array_path(project_id, run_id, time_ma)
         tectonic_potential_path = self.project_store.tectonic_potential_array_path(project_id, run_id, time_ma)
+        uplift_rate_path = self.project_store.uplift_rate_array_path(project_id, run_id, time_ma)
+        subsidence_rate_path = self.project_store.subsidence_rate_array_path(project_id, run_id, time_ma)
+        volcanic_flux_path = self.project_store.volcanic_flux_array_path(project_id, run_id, time_ma)
+        erosion_capacity_path = self.project_store.erosion_capacity_array_path(project_id, run_id, time_ma)
+        orogenic_root_path = self.project_store.orogenic_root_array_path(project_id, run_id, time_ma)
+        craton_id_path = self.project_store.craton_id_array_path(project_id, run_id, time_ma)
 
         self.project_store.write_array(oceanic_age_path, backend_result.oceanic_age_field)
         self.project_store.write_array(crust_type_path, backend_result.crust_type_field)
         self.project_store.write_array(crust_thickness_path, backend_result.crust_thickness_field)
         self.project_store.write_array(tectonic_potential_path, backend_result.tectonic_potential_field)
+        self.project_store.write_array(uplift_rate_path, backend_result.uplift_rate_field)
+        self.project_store.write_array(subsidence_rate_path, backend_result.subsidence_rate_field)
+        self.project_store.write_array(volcanic_flux_path, backend_result.volcanic_flux_field)
+        self.project_store.write_array(erosion_capacity_path, backend_result.erosion_capacity_field)
+        self.project_store.write_array(orogenic_root_path, backend_result.orogenic_root_field)
+        self.project_store.write_array(craton_id_path, backend_result.craton_id_field)
 
         backend_result.frame.oceanicAgeFieldRef = str(oceanic_age_path)
         backend_result.frame.crustTypeFieldRef = str(crust_type_path)
         backend_result.frame.crustThicknessFieldRef = str(crust_thickness_path)
         backend_result.frame.tectonicPotentialFieldRef = str(tectonic_potential_path)
+        backend_result.frame.upliftRateFieldRef = str(uplift_rate_path)
+        backend_result.frame.subsidenceRateFieldRef = str(subsidence_rate_path)
+        backend_result.frame.volcanicFluxFieldRef = str(volcanic_flux_path)
+        backend_result.frame.erosionCapacityFieldRef = str(erosion_capacity_path)
+        backend_result.frame.orogenicRootFieldRef = str(orogenic_root_path)
+        backend_result.frame.cratonIdFieldRef = str(craton_id_path)
+
+        module_payload = getattr(backend_result, "module_state_payload", None)
+        if module_payload:
+            module_path = self.project_store.module_state_path(project_id, run_id, time_ma)
+            self.project_store.write_json(module_path, module_payload)
+            backend_result.frame.moduleStateRef = str(module_path)
 
     def _extract_macro_snapshot(self, frame: TimelineFrame) -> dict[str, Any]:
         payload = frame.model_dump(mode="json")
@@ -334,6 +361,13 @@ class SimulationService:
         payload["crustTypeFieldRef"] = None
         payload["crustThicknessFieldRef"] = None
         payload["tectonicPotentialFieldRef"] = None
+        payload["upliftRateFieldRef"] = None
+        payload["subsidenceRateFieldRef"] = None
+        payload["volcanicFluxFieldRef"] = None
+        payload["erosionCapacityFieldRef"] = None
+        payload["orogenicRootFieldRef"] = None
+        payload["cratonIdFieldRef"] = None
+        payload["moduleStateRef"] = None
         return payload
 
     def _write_macro_history(self, project_id: str, run_id: str, snapshots: list[dict[str, Any]]) -> str:
@@ -516,20 +550,76 @@ class SimulationService:
             crust_type = (preview >= 0.53).astype(np.uint8)
             crust_thickness = np.where(crust_type > 0, 34.0 + fields["uplift"] * 18.0, 6.5 + oceanic_age * 0.012).astype(np.float32)
             tectonic_potential = np.clip(fields["uplift"] + fields["volcanic"] - fields["subsidence"], 0.0, 1.0).astype(np.float32)
+            uplift_rate = np.clip(fields["uplift"], 0.0, 1.0).astype(np.float32)
+            subsidence_rate = np.clip(fields["subsidence"], 0.0, 1.0).astype(np.float32)
+            volcanic_flux = np.clip(fields["volcanic"], 0.0, 1.0).astype(np.float32)
+            erosion_capacity = np.clip(1.0 - np.abs(np.gradient(preview)[0]), 0.0, 1.0).astype(np.float32)
+            orogenic_root = np.clip(uplift_rate * 0.7 + (crust_type.astype(np.float32) * 0.18), 0.0, 1.0).astype(np.float32)
+            craton_id = np.where(np.logical_and(crust_type > 0, crust_thickness > 38.0), 1, 0).astype(np.int32)
 
             oceanic_age_path = self.project_store.oceanic_age_array_path(project_id, run_id, frame.timeMa)
             crust_type_path = self.project_store.crust_type_array_path(project_id, run_id, frame.timeMa)
             crust_thickness_path = self.project_store.crust_thickness_array_path(project_id, run_id, frame.timeMa)
             tectonic_potential_path = self.project_store.tectonic_potential_array_path(project_id, run_id, frame.timeMa)
+            uplift_rate_path = self.project_store.uplift_rate_array_path(project_id, run_id, frame.timeMa)
+            subsidence_rate_path = self.project_store.subsidence_rate_array_path(project_id, run_id, frame.timeMa)
+            volcanic_flux_path = self.project_store.volcanic_flux_array_path(project_id, run_id, frame.timeMa)
+            erosion_capacity_path = self.project_store.erosion_capacity_array_path(project_id, run_id, frame.timeMa)
+            orogenic_root_path = self.project_store.orogenic_root_array_path(project_id, run_id, frame.timeMa)
+            craton_id_path = self.project_store.craton_id_array_path(project_id, run_id, frame.timeMa)
             self.project_store.write_array(oceanic_age_path, oceanic_age)
             self.project_store.write_array(crust_type_path, crust_type)
             self.project_store.write_array(crust_thickness_path, crust_thickness)
             self.project_store.write_array(tectonic_potential_path, tectonic_potential)
+            self.project_store.write_array(uplift_rate_path, uplift_rate)
+            self.project_store.write_array(subsidence_rate_path, subsidence_rate)
+            self.project_store.write_array(volcanic_flux_path, volcanic_flux)
+            self.project_store.write_array(erosion_capacity_path, erosion_capacity)
+            self.project_store.write_array(orogenic_root_path, orogenic_root)
+            self.project_store.write_array(craton_id_path, craton_id)
 
             frame.oceanicAgeFieldRef = str(oceanic_age_path)
             frame.crustTypeFieldRef = str(crust_type_path)
             frame.crustThicknessFieldRef = str(crust_thickness_path)
             frame.tectonicPotentialFieldRef = str(tectonic_potential_path)
+            frame.upliftRateFieldRef = str(uplift_rate_path)
+            frame.subsidenceRateFieldRef = str(subsidence_rate_path)
+            frame.volcanicFluxFieldRef = str(volcanic_flux_path)
+            frame.erosionCapacityFieldRef = str(erosion_capacity_path)
+            frame.orogenicRootFieldRef = str(orogenic_root_path)
+            frame.cratonIdFieldRef = str(craton_id_path)
+
+            module_payload = {
+                "timeMa": frame.timeMa,
+                "replayHash": stable_hash(
+                    {
+                        "macroDigest": context.macro_digest,
+                        "qualityMode": quality_mode.value,
+                        "timeMa": frame.timeMa,
+                    }
+                ),
+                "steps": [
+                    {
+                        "stepId": "surface_response_step",
+                        "inputDigest": stable_hash({"qualityMode": quality_mode.value, "timeMa": frame.timeMa}),
+                        "outputDigest": stable_hash(
+                            {
+                                "preview": str(preview_path),
+                                "oceanicAge": str(oceanic_age_path),
+                                "tectonicPotential": str(tectonic_potential_path),
+                            }
+                        ),
+                        "keyMetrics": {
+                            "terrain_mean": float(np.mean(preview)),
+                            "oceanic_age_p99_myr": float(np.percentile(oceanic_age, 99)),
+                        },
+                        "transitionReasons": [],
+                    }
+                ],
+            }
+            module_path = self.project_store.module_state_path(project_id, run_id, frame.timeMa)
+            self.project_store.write_json(module_path, module_payload)
+            frame.moduleStateRef = str(module_path)
 
             diagnostics = FrameDiagnostics(
                 projectId=project_id,
@@ -576,6 +666,7 @@ class SimulationService:
                     "framePath": str(self.project_store.frame_path(project_id, run_id, frame.timeMa)),
                     "renderFramePath": str(self.project_store.render_frame_path(project_id, run_id, frame.timeMa)),
                     "diagnosticsPath": str(self.project_store.run_diagnostics_path(project_id, run_id, frame.timeMa)),
+                    "moduleStatePath": str(self.project_store.module_state_path(project_id, run_id, frame.timeMa)),
                     "fullHash": full_hash,
                     "renderHash": render_hash,
                 }
@@ -735,6 +826,7 @@ class SimulationService:
                         "framePath": str(self.project_store.frame_path(project_id, run_id, time_ma)),
                         "renderFramePath": str(self.project_store.render_frame_path(project_id, run_id, time_ma)),
                         "diagnosticsPath": str(self.project_store.run_diagnostics_path(project_id, run_id, time_ma)),
+                        "moduleStatePath": str(self.project_store.module_state_path(project_id, run_id, time_ma)),
                         "fullHash": full_hash,
                         "renderHash": render_hash,
                     }
@@ -1115,6 +1207,148 @@ class SimulationService:
         if context:
             context.diagnostics_by_time[time_ma] = diagnostics
         return diagnostics
+
+    def _field_ref_from_frame(self, frame: TimelineFrame, field_name: str) -> str | None:
+        mapping = {
+            "relief": frame.previewHeightFieldRef,
+            "strain": frame.strainFieldRef,
+            "oceanic_age": frame.oceanicAgeFieldRef,
+            "crust_type": frame.crustTypeFieldRef,
+            "crust_thickness": frame.crustThicknessFieldRef,
+            "tectonic_potential": frame.tectonicPotentialFieldRef,
+            "uplift_rate": frame.upliftRateFieldRef,
+            "subsidence_rate": frame.subsidenceRateFieldRef,
+            "volcanic_flux": frame.volcanicFluxFieldRef,
+            "erosion_capacity": frame.erosionCapacityFieldRef,
+            "orogenic_root": frame.orogenicRootFieldRef,
+            "craton_id": frame.cratonIdFieldRef,
+        }
+        return mapping.get(field_name)
+
+    def get_field_sample(self, project_id: str, time_ma: int, field_name: str, max_dim: int = 256) -> FieldSampleResponse:
+        project = self.metadata.get_project(project_id)
+        if project is None:
+            raise ValueError(f"project {project_id} not found")
+        if project.currentRunId is None:
+            raise ValueError("project has no generated run")
+
+        run_id = project.currentRunId
+        frame_summary = self.get_or_create_frame(project, time_ma)
+        frame = frame_summary.frame
+        source_ref = self._field_ref_from_frame(frame, field_name)
+        if not source_ref:
+            raise ValueError(f"field {field_name} is not available for time {time_ma}")
+
+        path = Path(source_ref)
+        if not path.exists():
+            raise ValueError(f"field data not found for {field_name} at {time_ma} Ma")
+
+        arr = self.project_store.read_array(path)
+        if arr.ndim != 2:
+            arr = np.squeeze(arr)
+            if arr.ndim != 2:
+                raise ValueError("field data must be 2-dimensional")
+
+        stride = max(1, int(max(arr.shape[0], arr.shape[1]) / max(1, max_dim)))
+        sampled = arr[::stride, ::stride]
+        sampled = sampled.astype(np.float32)
+
+        stats = {
+            "min": float(np.min(arr)),
+            "max": float(np.max(arr)),
+            "p01": float(np.percentile(arr, 1)),
+            "p99": float(np.percentile(arr, 99)),
+            "mean": float(np.mean(arr)),
+            "var": float(np.var(arr)),
+        }
+
+        return FieldSampleResponse(
+            projectId=project_id,
+            runId=run_id,
+            timeMa=time_ma,
+            fieldName=field_name,
+            width=int(sampled.shape[1]),
+            height=int(sampled.shape[0]),
+            sourceRef=str(path),
+            stats=stats,
+            data=[[float(value) for value in row] for row in sampled],
+        )
+
+    def get_module_state(self, project_id: str, time_ma: int) -> ModuleStateResponse:
+        project = self.metadata.get_project(project_id)
+        if project is None:
+            raise ValueError(f"project {project_id} not found")
+        if project.currentRunId is None:
+            raise ValueError("project has no generated run")
+
+        run_id = project.currentRunId
+        frame_summary = self.get_or_create_frame(project, time_ma)
+        frame = frame_summary.frame
+
+        module_ref = frame.moduleStateRef
+        if module_ref:
+            path = Path(module_ref)
+        else:
+            path = self.project_store.module_state_path(project_id, run_id, time_ma)
+
+        if not path.exists():
+            raise ValueError(f"module states not found for {time_ma} Ma")
+        payload = self.project_store.read_json(path)
+        payload["projectId"] = project_id
+        payload["runId"] = run_id
+        payload["timeMa"] = int(payload.get("timeMa", time_ma))
+        return ModuleStateResponse.model_validate(payload)
+
+    def get_run_metrics(self, project_id: str, run_id: str) -> RunMetricsResponse:
+        project = self.metadata.get_project(project_id)
+        if project is None:
+            raise ValueError(f"project {project_id} not found")
+
+        manifest_path = self.project_store.run_manifest_path(project_id, run_id)
+        if not manifest_path.exists():
+            raise ValueError(f"run {run_id} not found")
+        manifest = self.project_store.read_json(manifest_path)
+
+        frame_times = [int(item["timeMa"]) for item in manifest.get("frames", []) if "timeMa" in item]
+        diagnostics_accum: dict[str, list[float]] = {}
+        for time_ma in frame_times:
+            payload = self.project_store.read_run_diagnostics(project_id, run_id, time_ma)
+            if not payload:
+                continue
+            diagnostics = FrameDiagnostics.model_validate(payload)
+            for metric_id, value in diagnostics.metrics.items():
+                diagnostics_accum.setdefault(metric_id, []).append(float(value))
+
+        diag_summary: dict[str, float] = {}
+        for metric_id, values in diagnostics_accum.items():
+            diag_summary[f"{metric_id}.mean"] = float(np.mean(values))
+            diag_summary[f"{metric_id}.max"] = float(np.max(values))
+
+        plausibility_summary = {"error": 0, "warning": 0, "info": 0}
+        if frame_times:
+            sample_stride = max(1, len(frame_times) // 12)
+            for time_ma in frame_times[::sample_stride]:
+                frame_payload = self.project_store.read_frame(project_id, run_id, time_ma)
+                if frame_payload is None:
+                    continue
+                frame = TimelineFrame.model_validate(frame_payload)
+                for check in build_plausibility_checks_from_frame(frame):
+                    plausibility_summary[check.severity] = plausibility_summary.get(check.severity, 0) + 1
+
+        coverage = {
+            "global": float(manifest.get("globalCoverageRatio", 0.0)),
+            "frame_count": float(len(frame_times)),
+            "fallback_time_count": float(len(manifest.get("fallbackTimesMa", []))),
+        }
+
+        return RunMetricsResponse(
+            projectId=project_id,
+            runId=run_id,
+            frameCount=len(frame_times),
+            coverage=coverage,
+            diagnostics=diag_summary,
+            plausibility=plausibility_summary,
+        )
 
     def get_coverage_report(self, project_id: str) -> CoverageReport:
         project = self.metadata.get_project(project_id)
