@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+.venv/
+.pytest_cache/
+
+# Node
+node_modules/
+apps/desktop/dist/
+
+# Tauri / Rust
+apps/desktop/src-tauri/target/
+
+# Runtime artifacts
+.DS_Store
+*.log
+coverage/
+
+# Local app data
+.geologic_wizard/

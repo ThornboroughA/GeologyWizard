@@ -1,0 +1,4 @@
+interface:
+  display_name: "PyGPlates Fiction Builder"
+  short_description: "Build fictional geology workflows with PyGPlates."
+  default_prompt: "Design and implement PyGPlates workflows and data models for a non-expert fictional geologic history application."
