@@ -18,6 +18,10 @@ Geologic Wizard is a desktop-first tectonic worldbuilding tool for non-experts. 
   - `GET /v1/projects/{projectId}/frames/{timeMa}/diagnostics`
   - `GET /v1/projects/{projectId}/coverage`
 
+## Agent reference
+
+- Project-wide Codex context and goals: `/Users/xander/Documents/Fantasy/Geologic_Wizard/AGENTS.md`
+
 ## Quick start (one command)
 
 ### Recommended: full desktop mode

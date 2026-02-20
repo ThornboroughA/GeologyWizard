@@ -58,10 +58,35 @@ def test_end_to_end_project_flow_with_diagnostics(tmp_path):
 
     frame = client.get(f"/v1/projects/{project['projectId']}/frames/50")
     frame.raise_for_status()
-    frame_payload = frame.json()["frame"]
+    frame_json = frame.json()
+    frame_payload = frame_json["frame"]
     assert frame_payload["timeMa"] == 50
     assert "plateKinematics" in frame_payload
     assert "uncertaintySummary" in frame_payload
+    assert frame_json["servedDetail"] == "full"
+    assert frame_json["nearestAvailableTimeMa"] is not None
+
+    timeline_index = client.get(f"/v1/projects/{project['projectId']}/timeline-index")
+    timeline_index.raise_for_status()
+    index_payload = timeline_index.json()
+    assert index_payload["generatedOrder"] == "descending_ma"
+    assert len(index_payload["times"]) > 0
+
+    render_range = client.get(
+        f"/v1/projects/{project['projectId']}/frames",
+        params={
+            "time_from": 60,
+            "time_to": 40,
+            "step": 10,
+            "detail": "render",
+            "exact": False,
+        },
+    )
+    render_range.raise_for_status()
+    render_payload = render_range.json()
+    assert render_payload["detail"] == "render"
+    assert len(render_payload["renderFrames"]) == 3
+    assert render_payload["renderFrames"][0]["landmassGeoJson"]["type"] == "FeatureCollection"
 
     diagnostics = client.get(f"/v1/projects/{project['projectId']}/frames/50/diagnostics")
     diagnostics.raise_for_status()

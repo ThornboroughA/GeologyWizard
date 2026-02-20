@@ -5,7 +5,7 @@ import json
 import uuid
 from typing import AsyncGenerator
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -19,12 +19,14 @@ from .models import (
     ExpertEditRequest,
     ExportRequest,
     FrameDiagnostics,
+    FrameRangeResponse,
     FrameSummary,
     GenerateRequest,
     JobStatus,
     JobSummary,
     ProjectCreateRequest,
     ProjectSummary,
+    TimelineIndex,
     ValidationReport,
 )
 from .project_store import ProjectStore
@@ -104,6 +106,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if latest is None:
             raise HTTPException(status_code=500, detail="job not available")
         return latest
+
+    @app.get("/v1/projects/{project_id}/timeline-index", response_model=TimelineIndex)
+    def get_timeline_index(project_id: str) -> TimelineIndex:
+        project = metadata.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        return simulation.get_timeline_index(project)
+
+    @app.get("/v1/projects/{project_id}/frames", response_model=FrameRangeResponse)
+    def get_frames_range(
+        project_id: str,
+        time_from: int = Query(...),
+        time_to: int = Query(...),
+        step: int = Query(1, ge=1),
+        detail: str = Query("render"),
+        exact: bool = Query(False),
+    ) -> FrameRangeResponse:
+        project = metadata.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        start = project.config.startTimeMa
+        end = project.config.endTimeMa
+        for value in (time_from, time_to):
+            if value < end or value > start:
+                raise HTTPException(status_code=400, detail="time out of project range")
+        try:
+            return simulation.get_frame_range(
+                project,
+                time_from=time_from,
+                time_to=time_to,
+                step=step,
+                detail=detail,
+                exact=exact,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/v1/projects/{project_id}/frames/{time_ma}", response_model=FrameSummary)
     def get_frame(project_id: str, time_ma: int) -> FrameSummary:

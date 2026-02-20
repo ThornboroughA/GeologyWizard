@@ -35,11 +35,18 @@ class ProjectStore:
     def run_dir(self, project_id: str, run_id: str) -> Path:
         run_root = ensure_dir(self.project_dir(project_id) / "runs" / run_id)
         ensure_dir(run_root / "frames")
+        ensure_dir(run_root / "render_frames")
         ensure_dir(run_root / "diagnostics")
         return run_root
 
     def frame_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
         return self.run_dir(project_id, run_id) / "frames" / f"{time_ma}.json"
+
+    def render_frame_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
+        return self.run_dir(project_id, run_id) / "render_frames" / f"{time_ma}.json"
+
+    def timeline_index_path(self, project_id: str, run_id: str) -> Path:
+        return self.run_dir(project_id, run_id) / "timeline_index.json"
 
     def write_json(self, path: Path, payload: dict[str, Any]) -> None:
         ensure_dir(path.parent)
@@ -58,6 +65,27 @@ class ProjectStore:
         if not path.exists():
             return None
         return self.read_json(path)
+
+    def write_render_frame(self, project_id: str, run_id: str, time_ma: int, render_payload: dict[str, Any]) -> Path:
+        path = self.render_frame_path(project_id, run_id, time_ma)
+        self.write_json(path, render_payload)
+        return path
+
+    def read_render_frame(self, project_id: str, run_id: str, time_ma: int) -> dict[str, Any] | None:
+        path = self.render_frame_path(project_id, run_id, time_ma)
+        if not path.exists():
+            return None
+        return self.read_json(path)
+
+    def list_frame_times(self, project_id: str, run_id: str) -> list[int]:
+        frames_root = self.run_dir(project_id, run_id) / "frames"
+        times: list[int] = []
+        for path in frames_root.glob("*.json"):
+            try:
+                times.append(int(path.stem))
+            except ValueError:
+                continue
+        return sorted(times, reverse=True)
 
     def preview_array_path(self, project_id: str, time_ma: int) -> Path:
         return self.project_dir(project_id) / "cache" / "preview" / f"{time_ma}.npy"

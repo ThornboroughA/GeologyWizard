@@ -174,6 +174,14 @@ button:disabled {
   color: #51606b;
 }
 
+.timeline-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
+  font-size: 0.75rem;
+  color: #5d6f7a;
+}
+
 .map-toolbar {
   display: flex;
   justify-content: space-between;
@@ -203,6 +211,27 @@ button:disabled {
   width: 100%;
   aspect-ratio: 2/1;
   border-radius: 14px;
+}
+
+.deck-shell {
+  width: 100%;
+  min-height: 420px;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(17, 40, 55, 0.15);
+  background:
+    radial-gradient(circle at 24% 18%, rgba(150, 199, 223, 0.2), transparent 30%),
+    linear-gradient(170deg, #0f3b53, #1f4c62);
+  position: relative;
+}
+
+.deck-shell-globe {
+  min-height: 440px;
+}
+
+.deck-shell canvas {
+  position: absolute !important;
+  inset: 0;
 }
 
 .plate-path {

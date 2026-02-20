@@ -11,6 +11,9 @@
     "tauri:build": "tauri build"
   },
   "dependencies": {
+    "@deck.gl/core": "^9.0.34",
+    "@deck.gl/layers": "^9.0.34",
+    "@deck.gl/react": "^9.0.34",
     "@tauri-apps/api": "^2.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"

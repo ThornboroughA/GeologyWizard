@@ -146,6 +146,17 @@ class TimelineFrame(BaseModel):
     previewHeightFieldRef: str
 
 
+class GeoJsonFeature(BaseModel):
+    type: Literal["Feature"] = "Feature"
+    geometry: dict[str, Any]
+    properties: dict[str, Any] = Field(default_factory=dict)
+
+
+class GeoJsonFeatureCollection(BaseModel):
+    type: Literal["FeatureCollection"] = "FeatureCollection"
+    features: list[GeoJsonFeature] = Field(default_factory=list)
+
+
 class Bookmark(BaseModel):
     bookmarkId: str
     timeMa: int
@@ -278,10 +289,49 @@ class ValidationReport(BaseModel):
     issues: list[ValidationIssue] = Field(default_factory=list)
 
 
+class TimelineIndexHashEntry(BaseModel):
+    full: str
+    render: str
+
+
+class TimelineIndex(BaseModel):
+    projectId: str
+    runId: str
+    startTimeMa: int
+    endTimeMa: int
+    stepMyr: int
+    generatedOrder: Literal["descending_ma"]
+    times: list[int] = Field(default_factory=list)
+    hashes: dict[str, TimelineIndexHashEntry] = Field(default_factory=dict)
+    availableDetails: list[Literal["render", "full"]] = Field(default_factory=lambda: ["render", "full"])
+
+
+class FrameRender(BaseModel):
+    timeMa: int
+    landmassGeoJson: GeoJsonFeatureCollection
+    boundaryGeoJson: GeoJsonFeatureCollection
+    overlayGeoJson: GeoJsonFeatureCollection
+    source: Literal["cache", "generated"]
+    nearestTimeMa: int
+
+
 class FrameSummary(BaseModel):
     frame: TimelineFrame
     frameHash: str
     source: Literal["cache", "generated"]
+    nearestAvailableTimeMa: int | None = None
+    servedDetail: Literal["full", "render"] = "full"
+
+
+class FrameRangeResponse(BaseModel):
+    projectId: str
+    detail: Literal["render", "full"]
+    timeFrom: int
+    timeTo: int
+    step: int
+    generatedOrder: Literal["descending_ma"]
+    fullFrames: list[FrameSummary] = Field(default_factory=list)
+    renderFrames: list[FrameRender] = Field(default_factory=list)
 
 
 class FrameDiagnostics(BaseModel):

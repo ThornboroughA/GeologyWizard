@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   applyExpertEdit,
@@ -9,7 +9,10 @@ import {
   getCoverage,
   getFrame,
   getFrameDiagnostics,
+  getFramesRange,
   getJob,
+  getRenderFrame,
+  getTimelineIndex,
   getValidation,
   listBookmarks,
   refineBookmark
@@ -25,6 +28,8 @@ import type {
   ProjectConfig,
   ProjectSummary,
   TimelineFrame,
+  TimelineFrameRender,
+  TimelineIndex,
   ValidationReport
 } from "./types";
 
@@ -44,6 +49,10 @@ const DEFAULT_CONFIG: ProjectConfig = {
   anchorPlateId: null
 };
 
+const SETTLE_DELAY_MS = 220;
+const PREFETCH_WINDOW_MA = 40;
+const PREFETCH_STEP_MA = 5;
+
 function mergeJobs(existing: JobSummary[], updates: JobSummary[]): JobSummary[] {
   const map = new Map(existing.map((job) => [job.jobId, job]));
   for (const update of updates) {
@@ -56,13 +65,22 @@ export default function App() {
   const [projectName, setProjectName] = useState("Asterion");
   const [config, setConfig] = useState<ProjectConfig>(DEFAULT_CONFIG);
   const [project, setProject] = useState<ProjectSummary | null>(null);
+
   const [timeMa, setTimeMa] = useState(1000);
+  const [scrubState, setScrubState] = useState<"idle" | "dragging" | "settling">("idle");
+  const [frameSource, setFrameSource] = useState<"cached_nearest" | "exact">("exact");
+  const [displayedTimeMa, setDisplayedTimeMa] = useState<number | null>(null);
+
   const [frame, setFrame] = useState<TimelineFrame | null>(null);
+  const [renderFrame, setRenderFrame] = useState<TimelineFrameRender | null>(null);
+  const [timelineIndex, setTimelineIndex] = useState<TimelineIndex | null>(null);
+
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [validation, setValidation] = useState<ValidationReport | null>(null);
   const [diagnostics, setDiagnostics] = useState<FrameDiagnostics | null>(null);
   const [coverage, setCoverage] = useState<CoverageReport | null>(null);
+
   const [bookmarkLabel, setBookmarkLabel] = useState("Key tectonic phase");
   const [selectedBookmarkId, setSelectedBookmarkId] = useState<string>("");
   const [viewMode, setViewMode] = useState<"2d" | "3d">("2d");
@@ -70,32 +88,149 @@ export default function App() {
   const [status, setStatus] = useState("Ready");
   const [error, setError] = useState<string | null>(null);
 
+  const settleTimerRef = useRef<number | null>(null);
+  const requestIdRef = useRef(0);
+  const activeControllerRef = useRef<AbortController | null>(null);
+  const renderCacheRef = useRef<Map<number, TimelineFrameRender>>(new Map());
+
   const runningJobIds = useMemo(
     () => jobs.filter((job) => ["queued", "running"].includes(job.status)).map((job) => job.jobId),
     [jobs]
   );
 
-  useEffect(() => {
+  function clearSettleTimer() {
+    if (settleTimerRef.current !== null) {
+      window.clearTimeout(settleTimerRef.current);
+      settleTimerRef.current = null;
+    }
+  }
+
+  function cacheRenderFrame(payload: TimelineFrameRender) {
+    renderCacheRef.current.set(payload.timeMa, payload);
+  }
+
+  function nearestCachedTime(target: number): number | null {
+    const times = Array.from(renderCacheRef.current.keys());
+    if (times.length === 0) {
+      return null;
+    }
+    return times.reduce((best, current) => (Math.abs(current - target) < Math.abs(best - target) ? current : best), times[0]);
+  }
+
+  function showNearestCachedFrame(target: number) {
+    const nearest = nearestCachedTime(target);
+    if (nearest === null) {
+      return;
+    }
+    const cached = renderCacheRef.current.get(nearest);
+    if (!cached) {
+      return;
+    }
+    setRenderFrame(cached);
+    setDisplayedTimeMa(cached.timeMa);
+    setFrameSource("cached_nearest");
+  }
+
+  async function prefetchRenderWindow(projectId: string, centerTimeMa: number) {
+    const startTimeMa = timelineIndex?.startTimeMa ?? project?.config.startTimeMa;
+    const endTimeMa = timelineIndex?.endTimeMa ?? project?.config.endTimeMa;
+    if (startTimeMa == null || endTimeMa == null) {
+      return;
+    }
+
+    const upper = Math.min(startTimeMa, centerTimeMa + PREFETCH_WINDOW_MA);
+    const lower = Math.max(endTimeMa, centerTimeMa - PREFETCH_WINDOW_MA);
+    try {
+      const response = await getFramesRange(projectId, {
+        timeFrom: upper,
+        timeTo: lower,
+        step: PREFETCH_STEP_MA,
+        detail: "render",
+        exact: false
+      });
+      for (const framePayload of response.renderFrames) {
+        cacheRenderFrame(framePayload);
+      }
+    } catch {
+      // Best-effort prefetch only.
+    }
+  }
+
+  async function fetchExactFrame(projectId: string, targetTimeMa: number) {
+    const requestId = ++requestIdRef.current;
+
+    activeControllerRef.current?.abort();
+    const controller = new AbortController();
+    activeControllerRef.current = controller;
+
+    setScrubState("settling");
+    try {
+      const [exactRender, fullFrame, frameDiagnostics] = await Promise.all([
+        getRenderFrame(projectId, targetTimeMa, { exact: true, signal: controller.signal }),
+        getFrame(projectId, targetTimeMa, controller.signal),
+        getFrameDiagnostics(projectId, targetTimeMa, controller.signal).catch(() => null)
+      ]);
+
+      if (controller.signal.aborted || requestId !== requestIdRef.current) {
+        return;
+      }
+
+      cacheRenderFrame(exactRender);
+      setRenderFrame(exactRender);
+      setDisplayedTimeMa(exactRender.timeMa);
+      setFrameSource("exact");
+
+      setFrame(fullFrame.frame);
+      setDiagnostics(frameDiagnostics);
+      setScrubState("idle");
+      setStatus(`Showing ${targetTimeMa} Ma`);
+
+      void prefetchRenderWindow(projectId, targetTimeMa);
+    } catch (err) {
+      if (controller.signal.aborted || requestId !== requestIdRef.current) {
+        return;
+      }
+      setScrubState("idle");
+      setError((err as Error).message);
+    }
+  }
+
+  function scheduleSettle(targetTimeMa: number) {
+    clearSettleTimer();
     if (!project) {
       return;
     }
-    const timer = window.setTimeout(async () => {
-      try {
-        const summary = await getFrame(project.projectId, timeMa);
-        setFrame(summary.frame);
-        try {
-          const frameDiagnostics = await getFrameDiagnostics(project.projectId, timeMa);
-          setDiagnostics(frameDiagnostics);
-        } catch {
-          setDiagnostics(null);
-        }
-      } catch (err) {
-        setError((err as Error).message);
-      }
-    }, 180);
+    settleTimerRef.current = window.setTimeout(() => {
+      settleTimerRef.current = null;
+      void fetchExactFrame(project.projectId, targetTimeMa);
+    }, SETTLE_DELAY_MS);
+  }
 
-    return () => window.clearTimeout(timer);
-  }, [project, timeMa]);
+  function handleTimelineChange(nextTimeMa: number) {
+    setTimeMa(nextTimeMa);
+    setScrubState("dragging");
+    showNearestCachedFrame(nextTimeMa);
+    scheduleSettle(nextTimeMa);
+  }
+
+  function handleScrubStart() {
+    setScrubState("dragging");
+  }
+
+  function handleScrubEnd() {
+    clearSettleTimer();
+    if (!project) {
+      return;
+    }
+    void fetchExactFrame(project.projectId, timeMa);
+  }
+
+  useEffect(() => {
+    return () => {
+      clearSettleTimer();
+      activeControllerRef.current?.abort();
+    };
+  }, []);
 
   useEffect(() => {
     if (runningJobIds.length === 0) {
@@ -108,19 +243,12 @@ export default function App() {
         setJobs((current) => mergeJobs(current, updates));
 
         const hasRefreshEvent = updates.some((job) => ["generate", "refine", "export"].includes(job.kind) && job.status === "completed");
+        const hasGenerateCompletion = updates.some((job) => job.kind === "generate" && job.status === "completed");
         if (project && hasRefreshEvent) {
-          const [frameSummary, bookmarkList, validationReport, coverageReport, frameDiagnostics] = await Promise.all([
-            getFrame(project.projectId, timeMa),
-            listBookmarks(project.projectId),
-            getValidation(project.projectId),
-            getCoverage(project.projectId),
-            getFrameDiagnostics(project.projectId, timeMa)
-          ]);
-          setFrame(frameSummary.frame);
-          setBookmarks(bookmarkList);
-          setValidation(validationReport);
-          setCoverage(coverageReport);
-          setDiagnostics(frameDiagnostics);
+          if (hasGenerateCompletion) {
+            renderCacheRef.current.clear();
+          }
+          await refreshProjectPanels(project.projectId, timeMa);
         }
       } catch (err) {
         setError((err as Error).message);
@@ -131,22 +259,19 @@ export default function App() {
   }, [project, runningJobIds, timeMa]);
 
   async function refreshProjectPanels(projectId: string, frameTime: number) {
-    const [frameSummary, bookmarkList, validationReport, coverageReport] = await Promise.all([
-      getFrame(projectId, frameTime),
+    const [bookmarkList, validationReport, coverageReport, nextTimelineIndex] = await Promise.all([
       listBookmarks(projectId),
       getValidation(projectId),
-      getCoverage(projectId)
+      getCoverage(projectId),
+      getTimelineIndex(projectId)
     ]);
-    setFrame(frameSummary.frame);
+
     setBookmarks(bookmarkList);
     setValidation(validationReport);
     setCoverage(coverageReport);
-    try {
-      const frameDiagnostics = await getFrameDiagnostics(projectId, frameTime);
-      setDiagnostics(frameDiagnostics);
-    } catch {
-      setDiagnostics(null);
-    }
+    setTimelineIndex(nextTimelineIndex);
+
+    await fetchExactFrame(projectId, frameTime);
   }
 
   async function handleCreateProject() {
@@ -162,6 +287,16 @@ export default function App() {
       setValidation(null);
       setCoverage(null);
       setDiagnostics(null);
+      setFrame(null);
+      setRenderFrame(null);
+      setDisplayedTimeMa(null);
+      setFrameSource("exact");
+      renderCacheRef.current.clear();
+
+      const index = await getTimelineIndex(created.projectId);
+      setTimelineIndex(index);
+
+      await fetchExactFrame(created.projectId, created.config.startTimeMa);
       setStatus(`Project ${created.name} ready`);
     } catch (err) {
       setError((err as Error).message);
@@ -291,6 +426,10 @@ export default function App() {
     config.simulationMode === "hybrid_rigor"
       ? "Hybrid rigor mode: better physical plausibility, potentially longer runtime than fast mode."
       : "Fast plausible mode: optimized for iteration speed with controlled geologic approximations.";
+
+  const mapSummary = renderFrame
+    ? `${renderFrame.landmassGeoJson.features.length} landmasses, ${renderFrame.boundaryGeoJson.features.length} boundaries, ${renderFrame.overlayGeoJson.features.length} overlays`
+    : "No frame loaded";
 
   return (
     <div className="app-shell">
@@ -436,7 +575,13 @@ export default function App() {
             min={project?.config.endTimeMa ?? 0}
             max={project?.config.startTimeMa ?? 1000}
             step={project?.config.timeIncrementMyr ?? 1}
-            onChange={setTimeMa}
+            requestedTime={timeMa}
+            displayedTime={displayedTimeMa}
+            frameSource={frameSource}
+            scrubState={scrubState}
+            onChange={handleTimelineChange}
+            onScrubStart={handleScrubStart}
+            onScrubEnd={handleScrubEnd}
           />
 
           <div className="map-toolbar">
@@ -459,14 +604,10 @@ export default function App() {
                 <option value="subsidence">subsidence</option>
               </select>
             </label>
-            <p className="muted">
-              {frame
-                ? `${frame.plateGeometries.length} plates, ${frame.boundaryGeometries.length} boundaries, ${frame.eventOverlays.length} active events`
-                : "No frame loaded"}
-            </p>
+            <p className="muted">{mapSummary}</p>
           </div>
 
-          <MapScene frame={frame} mode={viewMode} overlay={overlay} />
+          <MapScene frame={renderFrame} mode={viewMode} overlay={overlay} />
 
           {frame ? (
             <div className="metrics-grid">
@@ -530,10 +671,23 @@ export default function App() {
                 ))}
               </ul>
             ) : (
-              <p className="muted">No validation findings on sampled keyframes.</p>
+              <p className="muted">No validation findings on sampled frames.</p>
             )
           ) : (
             <p className="muted">Validation report appears after first generation or edit.</p>
+          )}
+
+          <h2>Timeline Cache</h2>
+          {timelineIndex ? (
+            <div className="project-details">
+              <p>Cached frames: {timelineIndex.times.length}</p>
+              <p>Order: {timelineIndex.generatedOrder}</p>
+              <p>
+                Step: {timelineIndex.stepMyr} Myr ({timelineIndex.startTimeMa} {"->"} {timelineIndex.endTimeMa} Ma)
+              </p>
+            </div>
+          ) : (
+            <p className="muted">Timeline index loads after project creation.</p>
           )}
 
           <h2>Project</h2>
@@ -546,7 +700,8 @@ export default function App() {
               <p>
                 Range: {project.config.startTimeMa} Ma to {project.config.endTimeMa} Ma
               </p>
-              <p>Current Time: {timeMa} Ma</p>
+              <p>Requested Time: {timeMa} Ma</p>
+              <p>Displayed Time: {displayedTimeMa ?? "n/a"} Ma</p>
             </div>
           ) : (
             <p className="muted">Create a project to begin.</p>

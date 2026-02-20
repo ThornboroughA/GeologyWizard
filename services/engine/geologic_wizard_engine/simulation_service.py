@@ -18,15 +18,20 @@ from .models import (
     ExportRequest,
     ExportResult,
     FrameDiagnostics,
+    FrameRangeResponse,
+    FrameRender,
     FrameSummary,
     ProjectConfig,
     ProjectSummary,
     ProvenanceRecord,
     RefineResult,
+    TimelineIndex,
+    TimelineIndexHashEntry,
     TimelineFrame,
     ValidationIssue,
     ValidationReport,
 )
+from .modules.render_payload import build_frame_render_payload
 from .modules.pygplates_adapter import PygplatesAdapter
 from .modules.tectonic_backends import (
     aggregate_fallback_times,
@@ -58,6 +63,7 @@ class RunContext:
     diagnostics_by_time: dict[int, FrameDiagnostics] = field(default_factory=dict)
     kinematic_digest_by_time: dict[int, str] = field(default_factory=dict)
     uncertainty_digest_by_time: dict[int, str] = field(default_factory=dict)
+    timeline_index: TimelineIndex | None = None
 
     @property
     def global_coverage(self) -> float:
@@ -127,6 +133,7 @@ class SimulationService:
                 int(item["timeMa"]): str(item["uncertaintyDigest"]) for item in manifest.get("coverageByTime", [])
             },
         )
+        context.timeline_index = self._read_timeline_index(project_id, run_id)
         return context
 
     def _resolve_context(self, project_id: str, run_id: str) -> RunContext | None:
@@ -139,6 +146,125 @@ class SimulationService:
             return None
         self._run_contexts[run_id] = context
         return context
+
+    def _nearest_time(self, times: list[int], target_time_ma: int) -> int | None:
+        if not times:
+            return None
+        return min(times, key=lambda candidate: abs(candidate - target_time_ma))
+
+    def _empty_timeline_index(self, project_id: str, run_id: str, config: ProjectConfig) -> TimelineIndex:
+        return TimelineIndex(
+            projectId=project_id,
+            runId=run_id,
+            startTimeMa=config.startTimeMa,
+            endTimeMa=config.endTimeMa,
+            stepMyr=config.timeIncrementMyr,
+            generatedOrder="descending_ma",
+            times=[],
+            hashes={},
+            availableDetails=["render", "full"],
+        )
+
+    def _read_timeline_index(self, project_id: str, run_id: str) -> TimelineIndex | None:
+        index_path = self.project_store.timeline_index_path(project_id, run_id)
+        if not index_path.exists():
+            return None
+        try:
+            payload = self.project_store.read_json(index_path)
+            return TimelineIndex.model_validate(payload)
+        except Exception:
+            return None
+
+    def _write_timeline_index(self, project_id: str, run_id: str, index: TimelineIndex) -> None:
+        self.project_store.write_json(
+            self.project_store.timeline_index_path(project_id, run_id),
+            index.model_dump(mode="json"),
+        )
+
+    def _persist_frame_bundle(
+        self,
+        *,
+        project_id: str,
+        run_id: str,
+        frame: TimelineFrame,
+        diagnostics: FrameDiagnostics,
+        source: str,
+    ) -> tuple[str, str]:
+        full_payload = frame.model_dump(mode="json")
+        self.project_store.write_frame(project_id, run_id, frame.timeMa, full_payload)
+
+        render_frame = build_frame_render_payload(
+            frame,
+            source=source,
+            nearest_time_ma=frame.timeMa,
+        )
+        render_payload = render_frame.model_dump(mode="json")
+        self.project_store.write_render_frame(project_id, run_id, frame.timeMa, render_payload)
+        self.project_store.write_run_diagnostics(project_id, run_id, frame.timeMa, diagnostics.model_dump(mode="json"))
+        return stable_hash(full_payload), stable_hash(render_payload)
+
+    def _build_timeline_index_from_cached_frames(
+        self,
+        project_id: str,
+        run_id: str,
+        run_config: ProjectConfig,
+    ) -> TimelineIndex:
+        index = self._empty_timeline_index(project_id, run_id, run_config)
+        frame_times = self.project_store.list_frame_times(project_id, run_id)
+        hashes: dict[str, TimelineIndexHashEntry] = {}
+
+        for time_ma in frame_times:
+            frame_payload = self.project_store.read_frame(project_id, run_id, time_ma)
+            if frame_payload is None:
+                continue
+            frame = TimelineFrame.model_validate(frame_payload)
+            full_hash = stable_hash(frame_payload)
+
+            render_payload = self.project_store.read_render_frame(project_id, run_id, time_ma)
+            if render_payload is None:
+                render_frame = build_frame_render_payload(frame, source="generated", nearest_time_ma=time_ma)
+                render_payload = render_frame.model_dump(mode="json")
+                self.project_store.write_render_frame(project_id, run_id, time_ma, render_payload)
+
+            render_hash = stable_hash(render_payload)
+            hashes[str(time_ma)] = TimelineIndexHashEntry(full=full_hash, render=render_hash)
+
+        index.times = sorted([int(key) for key in hashes.keys()], reverse=True)
+        index.hashes = {str(time): hashes[str(time)] for time in index.times}
+        self._write_timeline_index(project_id, run_id, index)
+        return index
+
+    def _load_or_build_timeline_index(
+        self,
+        project_id: str,
+        run_id: str,
+        run_config: ProjectConfig,
+        *,
+        context: RunContext | None = None,
+    ) -> TimelineIndex:
+        if context and context.timeline_index is not None:
+            return context.timeline_index
+
+        timeline_index = self._read_timeline_index(project_id, run_id)
+        if timeline_index is None:
+            timeline_index = self._build_timeline_index_from_cached_frames(project_id, run_id, run_config)
+
+        if context:
+            context.timeline_index = timeline_index
+        return timeline_index
+
+    def _record_timeline_hash(
+        self,
+        index: TimelineIndex,
+        *,
+        time_ma: int,
+        full_hash: str,
+        render_hash: str,
+    ) -> None:
+        index.hashes[str(time_ma)] = TimelineIndexHashEntry(full=full_hash, render=render_hash)
+        if time_ma not in index.times:
+            index.times.append(time_ma)
+            index.times.sort(reverse=True)
 
     def generate_project(
         self,
@@ -193,6 +319,7 @@ class SimulationService:
             "frames": [],
             "coverageByTime": [],
         }
+        timeline_index = self._empty_timeline_index(project_id, run_id, run_config)
 
         for idx, time_ma in enumerate(steps, start=1):
             if is_canceled():
@@ -224,25 +351,29 @@ class SimulationService:
 
             backend_result.frame.previewHeightFieldRef = str(preview_path)
             backend_result.frame.strainFieldRef = str(strain_path)
-
-            should_cache_keyframe = (
-                time_ma % self.settings.keyframe_interval_myr == 0
-                or time_ma == run_config.startTimeMa
-                or time_ma == run_config.endTimeMa
+            full_hash, render_hash = self._persist_frame_bundle(
+                project_id=project_id,
+                run_id=run_id,
+                frame=backend_result.frame,
+                diagnostics=backend_result.diagnostics,
+                source="generated",
             )
-
-            if should_cache_keyframe:
-                frame_payload = backend_result.frame.model_dump(mode="json")
-                frame_path = self.project_store.write_frame(project_id, run_id, time_ma, frame_payload)
-                diag_payload = backend_result.diagnostics.model_dump(mode="json")
-                diag_path = self.project_store.write_run_diagnostics(project_id, run_id, time_ma, diag_payload)
-                manifest["frames"].append(
-                    {
-                        "timeMa": time_ma,
-                        "framePath": str(frame_path),
-                        "diagnosticsPath": str(diag_path),
-                    }
-                )
+            self._record_timeline_hash(
+                timeline_index,
+                time_ma=time_ma,
+                full_hash=full_hash,
+                render_hash=render_hash,
+            )
+            manifest["frames"].append(
+                {
+                    "timeMa": time_ma,
+                    "framePath": str(self.project_store.frame_path(project_id, run_id, time_ma)),
+                    "renderFramePath": str(self.project_store.render_frame_path(project_id, run_id, time_ma)),
+                    "diagnosticsPath": str(self.project_store.run_diagnostics_path(project_id, run_id, time_ma)),
+                    "fullHash": full_hash,
+                    "renderHash": render_hash,
+                }
+            )
 
             coverage_ratio = round((backend_result.coverage_ratio + frame_coverage_ratio(backend_result.frame)) * 0.5, 4)
             context.coverage_by_time[time_ma] = coverage_ratio
@@ -267,14 +398,18 @@ class SimulationService:
         fallback_times = aggregate_fallback_times(steps, context.coverage_by_time)
         manifest["fallbackTimesMa"] = fallback_times
         manifest["globalCoverageRatio"] = context.global_coverage
+        manifest["generatedOrder"] = "descending_ma"
+        manifest["timelineIndexPath"] = str(self.project_store.timeline_index_path(project_id, run_id))
 
         manifest_path = self.project_store.run_manifest_path(project_id, run_id)
         self.project_store.write_json(manifest_path, manifest)
+        self._write_timeline_index(project_id, run_id, timeline_index)
 
+        context.timeline_index = timeline_index
         self._run_contexts[run_id] = context
         return run_id
 
-    def _replay_frame(self, project: ProjectSummary, run_config: ProjectConfig, run_id: str, time_ma: int) -> TimelineFrame:
+    def _replay_frame(self, project: ProjectSummary, run_config: ProjectConfig, run_id: str, time_ma: int) -> Any:
         edits = self.metadata.list_edits(project.projectId)
         seed_bundle = derive_seed_bundle(run_config.seed)
         backend = build_backend(run_config.simulationMode)
@@ -307,38 +442,240 @@ class SimulationService:
             backend_result.frame.strainFieldRef = str(strain_path)
 
             if current_time == time_ma:
-                self.project_store.write_frame(project.projectId, run_id, current_time, backend_result.frame.model_dump(mode="json"))
-                self.project_store.write_run_diagnostics(
-                    project.projectId,
-                    run_id,
-                    current_time,
-                    backend_result.diagnostics.model_dump(mode="json"),
+                self._persist_frame_bundle(
+                    project_id=project.projectId,
+                    run_id=run_id,
+                    frame=backend_result.frame,
+                    diagnostics=backend_result.diagnostics,
+                    source="generated",
                 )
-                return backend_result.frame
+                return backend_result
 
             backend.advance(state, run_config, current_time, run_config.timeIncrementMyr, edits)
 
         raise ValueError(f"could not replay frame for time {time_ma}")
 
+    def _read_or_build_render_frame(self, project_id: str, run_id: str, time_ma: int) -> FrameRender | None:
+        render_payload = self.project_store.read_render_frame(project_id, run_id, time_ma)
+        if render_payload is not None:
+            return FrameRender.model_validate(render_payload)
+
+        full_payload = self.project_store.read_frame(project_id, run_id, time_ma)
+        if full_payload is None:
+            return None
+
+        frame = TimelineFrame.model_validate(full_payload)
+        render_frame = build_frame_render_payload(frame, source="generated", nearest_time_ma=time_ma)
+        self.project_store.write_render_frame(project_id, run_id, time_ma, render_frame.model_dump(mode="json"))
+        return render_frame
+
+    def _backfill_time_index_entry(
+        self,
+        *,
+        index: TimelineIndex,
+        project_id: str,
+        run_id: str,
+        time_ma: int,
+        frame_payload: dict[str, Any],
+    ) -> None:
+        render_payload = self.project_store.read_render_frame(project_id, run_id, time_ma)
+        if render_payload is None:
+            frame = TimelineFrame.model_validate(frame_payload)
+            render_payload = build_frame_render_payload(
+                frame,
+                source="generated",
+                nearest_time_ma=time_ma,
+            ).model_dump(mode="json")
+            self.project_store.write_render_frame(project_id, run_id, time_ma, render_payload)
+
+        self._record_timeline_hash(
+            index,
+            time_ma=time_ma,
+            full_hash=stable_hash(frame_payload),
+            render_hash=stable_hash(render_payload),
+        )
+
     def get_or_create_frame(self, project: ProjectSummary, time_ma: int) -> FrameSummary:
         run_id = project.currentRunId
         if run_id:
-            cached = self.project_store.read_frame(project.projectId, run_id, time_ma)
-            if cached is not None:
-                frame_hash = stable_hash(cached)
-                return FrameSummary(frame=TimelineFrame.model_validate(cached), frameHash=frame_hash, source="cache")
-
             context = self._resolve_context(project.projectId, run_id)
             run_config = context.config if context is not None else project.config
-            frame = self._replay_frame(project, run_config, run_id, time_ma)
-            payload = frame.model_dump(mode="json")
-            return FrameSummary(frame=frame, frameHash=stable_hash(payload), source="generated")
+            index = self._load_or_build_timeline_index(project.projectId, run_id, run_config, context=context)
+            nearest = self._nearest_time(index.times, time_ma)
+
+            cached = self.project_store.read_frame(project.projectId, run_id, time_ma)
+            if cached is not None:
+                if str(time_ma) not in index.hashes:
+                    self._backfill_time_index_entry(
+                        index=index,
+                        project_id=project.projectId,
+                        run_id=run_id,
+                        time_ma=time_ma,
+                        frame_payload=cached,
+                    )
+                    self._write_timeline_index(project.projectId, run_id, index)
+                frame_hash = index.hashes[str(time_ma)].full
+                return FrameSummary(
+                    frame=TimelineFrame.model_validate(cached),
+                    frameHash=frame_hash,
+                    source="cache",
+                    nearestAvailableTimeMa=nearest,
+                    servedDetail="full",
+                )
+
+            replay = self._replay_frame(project, run_config, run_id, time_ma)
+            payload = replay.frame.model_dump(mode="json")
+            full_hash = stable_hash(payload)
+            render_hash = stable_hash(
+                self.project_store.read_render_frame(project.projectId, run_id, time_ma)
+                or build_frame_render_payload(replay.frame, source="generated", nearest_time_ma=time_ma).model_dump(mode="json")
+            )
+            self._record_timeline_hash(index, time_ma=time_ma, full_hash=full_hash, render_hash=render_hash)
+            self._write_timeline_index(project.projectId, run_id, index)
+
+            if context is not None:
+                context.diagnostics_by_time[time_ma] = replay.diagnostics
+                coverage_ratio = round((replay.coverage_ratio + frame_coverage_ratio(replay.frame)) * 0.5, 4)
+                context.coverage_by_time[time_ma] = coverage_ratio
+                context.kinematic_digest_by_time[time_ma] = replay.kinematic_digest
+                context.uncertainty_digest_by_time[time_ma] = replay.uncertainty_digest
+
+            return FrameSummary(
+                frame=replay.frame,
+                frameHash=full_hash,
+                source="generated",
+                nearestAvailableTimeMa=nearest,
+                servedDetail="full",
+            )
 
         # No run exists yet: deterministic ephemeral frame from project defaults.
         fake_run_id = "ephemeral"
-        frame = self._replay_frame(project, project.config, fake_run_id, time_ma)
-        payload = frame.model_dump(mode="json")
-        return FrameSummary(frame=frame, frameHash=stable_hash(payload), source="generated")
+        replay = self._replay_frame(project, project.config, fake_run_id, time_ma)
+        payload = replay.frame.model_dump(mode="json")
+        return FrameSummary(
+            frame=replay.frame,
+            frameHash=stable_hash(payload),
+            source="generated",
+            nearestAvailableTimeMa=time_ma,
+            servedDetail="full",
+        )
+
+    def get_frame_render(
+        self,
+        project: ProjectSummary,
+        time_ma: int,
+        *,
+        exact: bool,
+    ) -> FrameRender:
+        run_id = project.currentRunId
+        if run_id is None:
+            replay = self._replay_frame(project, project.config, "ephemeral", time_ma)
+            return build_frame_render_payload(
+                replay.frame,
+                source="generated",
+                nearest_time_ma=time_ma,
+            )
+
+        context = self._resolve_context(project.projectId, run_id)
+        run_config = context.config if context is not None else project.config
+        index = self._load_or_build_timeline_index(project.projectId, run_id, run_config, context=context)
+
+        nearest = self._nearest_time(index.times, time_ma)
+        candidate_time = time_ma if (exact or time_ma in index.times) else nearest
+
+        if candidate_time is not None:
+            render = self._read_or_build_render_frame(project.projectId, run_id, candidate_time)
+            if render is not None:
+                source = "cache" if candidate_time in index.times else "generated"
+                return render.model_copy(update={"source": source, "nearestTimeMa": nearest or candidate_time})
+
+        replay = self._replay_frame(project, run_config, run_id, time_ma)
+        frame_payload = replay.frame.model_dump(mode="json")
+        self._backfill_time_index_entry(
+            index=index,
+            project_id=project.projectId,
+            run_id=run_id,
+            time_ma=time_ma,
+            frame_payload=frame_payload,
+        )
+        self._write_timeline_index(project.projectId, run_id, index)
+
+        if context is not None:
+            context.diagnostics_by_time[time_ma] = replay.diagnostics
+
+        return build_frame_render_payload(
+            replay.frame,
+            source="generated",
+            nearest_time_ma=nearest or time_ma,
+        )
+
+    def get_timeline_index(self, project: ProjectSummary) -> TimelineIndex:
+        if project.currentRunId is None:
+            return TimelineIndex(
+                projectId=project.projectId,
+                runId="uninitialized",
+                startTimeMa=project.config.startTimeMa,
+                endTimeMa=project.config.endTimeMa,
+                stepMyr=project.config.timeIncrementMyr,
+                generatedOrder="descending_ma",
+                times=self._time_steps(
+                    project.config.startTimeMa,
+                    project.config.endTimeMa,
+                    project.config.timeIncrementMyr,
+                ),
+                hashes={},
+                availableDetails=[],
+            )
+
+        run_id = project.currentRunId
+        context = self._resolve_context(project.projectId, run_id)
+        run_config = context.config if context else project.config
+        return self._load_or_build_timeline_index(project.projectId, run_id, run_config, context=context)
+
+    def get_frame_range(
+        self,
+        project: ProjectSummary,
+        *,
+        time_from: int,
+        time_to: int,
+        step: int,
+        detail: str,
+        exact: bool,
+    ) -> FrameRangeResponse:
+        if step <= 0:
+            raise ValueError("step must be positive")
+        if detail not in {"render", "full"}:
+            raise ValueError("detail must be one of: render, full")
+
+        direction = -1 if time_from >= time_to else 1
+        values: list[int] = []
+        current = time_from
+        while True:
+            values.append(current)
+            if current == time_to:
+                break
+            next_value = current + (direction * step)
+            if direction < 0 and next_value < time_to:
+                next_value = time_to
+            if direction > 0 and next_value > time_to:
+                next_value = time_to
+            current = next_value
+
+        response = FrameRangeResponse(
+            projectId=project.projectId,
+            detail="render" if detail == "render" else "full",
+            timeFrom=time_from,
+            timeTo=time_to,
+            step=step,
+            generatedOrder="descending_ma",
+        )
+
+        if detail == "full":
+            response.fullFrames = [self.get_or_create_frame(project, value) for value in values]
+            return response
+
+        response.renderFrames = [self.get_frame_render(project, value, exact=exact) for value in values]
+        return response
 
     def get_frame_diagnostics(self, project_id: str, time_ma: int) -> FrameDiagnostics:
         project = self.metadata.get_project(project_id)
@@ -371,6 +708,9 @@ class SimulationService:
             warnings=[],
             pygplatesStatus=context.pygplates_status if context else "unknown",
         )
+        self.project_store.write_run_diagnostics(project_id, run_id, time_ma, diagnostics.model_dump(mode="json"))
+        if context:
+            context.diagnostics_by_time[time_ma] = diagnostics
         return diagnostics
 
     def get_coverage_report(self, project_id: str) -> CoverageReport:
@@ -667,7 +1007,7 @@ class SimulationService:
         context = self._resolve_context(project_id, run_id)
         run_config = context.config if context else project.config
 
-        steps = self._time_steps(run_config.startTimeMa, run_config.endTimeMa, self.settings.keyframe_interval_myr)
+        steps = self._time_steps(run_config.startTimeMa, run_config.endTimeMa, run_config.timeIncrementMyr)
         sample_times = steps[:6]
         previous_frame: TimelineFrame | None = None
 
@@ -676,9 +1016,9 @@ class SimulationService:
             if frame_payload is None:
                 issues.append(
                     ValidationIssue(
-                        code="missing_keyframe",
+                        code="missing_frame_cache",
                         severity="warning",
-                        message=f"Keyframe {time_ma} Ma is missing from cache",
+                        message=f"Frame {time_ma} Ma is missing from cache",
                         details={"timeMa": time_ma},
                     )
                 )

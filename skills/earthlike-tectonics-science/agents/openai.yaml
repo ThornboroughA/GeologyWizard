@@ -1,0 +1,4 @@
+interface:
+  display_name: "Earthlike Tectonics Science"
+  short_description: "Reference checks for plausible tectonic world simulation"
+  default_prompt: "Apply Earth-like tectonic science references and plausibility checks to this worldbuilding simulation task."

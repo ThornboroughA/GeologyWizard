@@ -7,9 +7,19 @@ export interface PolygonGeometry {
   coordinates: number[][][];
 }
 
+export interface MultiPolygonGeometry {
+  type: "MultiPolygon";
+  coordinates: number[][][][];
+}
+
 export interface LineStringGeometry {
   type: "LineString";
   coordinates: number[][];
+}
+
+export interface MultiLineStringGeometry {
+  type: "MultiLineString";
+  coordinates: number[][][];
 }
 
 export interface ProjectConfig {
@@ -111,6 +121,56 @@ export interface FrameSummary {
   frame: TimelineFrame;
   frameHash: string;
   source: "cache" | "generated";
+  nearestAvailableTimeMa?: number | null;
+  servedDetail: "full" | "render";
+}
+
+export interface GeoJsonFeature {
+  type: "Feature";
+  geometry: PolygonGeometry | MultiPolygonGeometry | LineStringGeometry | MultiLineStringGeometry;
+  properties: Record<string, unknown>;
+}
+
+export interface GeoJsonFeatureCollection {
+  type: "FeatureCollection";
+  features: GeoJsonFeature[];
+}
+
+export interface TimelineFrameRender {
+  timeMa: number;
+  landmassGeoJson: GeoJsonFeatureCollection;
+  boundaryGeoJson: GeoJsonFeatureCollection;
+  overlayGeoJson: GeoJsonFeatureCollection;
+  source: "cache" | "generated";
+  nearestTimeMa: number;
+}
+
+export interface TimelineIndexHashEntry {
+  full: string;
+  render: string;
+}
+
+export interface TimelineIndex {
+  projectId: string;
+  runId: string;
+  startTimeMa: number;
+  endTimeMa: number;
+  stepMyr: number;
+  generatedOrder: "descending_ma";
+  times: number[];
+  hashes: Record<string, TimelineIndexHashEntry>;
+  availableDetails: Array<"render" | "full">;
+}
+
+export interface FrameRangeResponse {
+  projectId: string;
+  detail: "render" | "full";
+  timeFrom: number;
+  timeTo: number;
+  step: number;
+  generatedOrder: "descending_ma";
+  fullFrames: FrameSummary[];
+  renderFrames: TimelineFrameRender[];
 }
 
 export interface FrameDiagnostics {

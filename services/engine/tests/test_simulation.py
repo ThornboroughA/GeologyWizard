@@ -106,3 +106,39 @@ def test_coverage_report_contains_timeline(tmp_path):
     assert report.projectId == "p3"
     assert len(report.coverageRatioByTime) > 0
     assert 0 <= report.globalCoverageRatio <= 1
+
+
+def test_generation_persists_every_step_frame_and_timeline_index(tmp_path):
+    service, metadata, project_store = _build_service(tmp_path)
+
+    config = ProjectConfig(seed=303, plateCount=7, startTimeMa=20, endTimeMa=0, timeIncrementMyr=2, stepMyr=2)
+    metadata.create_project(
+        project_id="p4",
+        name="TimelineIndex",
+        config=config,
+        project_hash=stable_hash(config.model_dump(mode="json")),
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    project_store.initialize_project("p4", config.model_dump(mode="json"))
+
+    service.generate_project(
+        "p4",
+        simulation_mode_override="fast_plausible",
+        rigor_profile_override="balanced",
+        runtime_override=45,
+        job_callback=lambda *_args: None,
+        is_canceled=lambda: False,
+    )
+
+    project = metadata.get_project("p4")
+    assert project is not None
+    assert project.currentRunId is not None
+
+    expected_times = [20, 18, 16, 14, 12, 10, 8, 6, 4, 2, 0]
+    timeline_index = service.get_timeline_index(project)
+    assert timeline_index.times == expected_times
+    assert timeline_index.generatedOrder == "descending_ma"
+
+    for time_ma in expected_times:
+        assert project_store.read_frame("p4", project.currentRunId, time_ma) is not None
+        assert project_store.read_render_frame("p4", project.currentRunId, time_ma) is not None
