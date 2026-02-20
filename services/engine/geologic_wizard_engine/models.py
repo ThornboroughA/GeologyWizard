@@ -11,14 +11,29 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+class SimulationMode(str, Enum):
+    fast_plausible = "fast_plausible"
+    hybrid_rigor = "hybrid_rigor"
+
+
+class RigorProfile(str, Enum):
+    balanced = "balanced"
+    research = "research"
+
+
 class ProjectConfig(BaseModel):
     seed: int = 42
     startTimeMa: int = 1000
     endTimeMa: int = 0
     stepMyr: int = 1
+    timeIncrementMyr: int = 1
     planetRadiusKm: float = 6371.0
     plateCount: int = 14
     fidelityPreset: Literal["kinematic_rules", "high_physics", "procedural_light"] = "kinematic_rules"
+    simulationMode: SimulationMode = SimulationMode.fast_plausible
+    rigorProfile: RigorProfile = RigorProfile.balanced
+    targetRuntimeMinutes: int = 60
+    maxPlateVelocityCmYr: float = 14.0
     anchorPlateId: int | None = None
 
     @model_validator(mode="after")
@@ -27,9 +42,25 @@ class ProjectConfig(BaseModel):
             raise ValueError("startTimeMa must be greater than endTimeMa")
         if self.stepMyr <= 0:
             raise ValueError("stepMyr must be positive")
+        if self.timeIncrementMyr <= 0:
+            raise ValueError("timeIncrementMyr must be positive")
+        if self.stepMyr != self.timeIncrementMyr:
+            # Keep backward compatibility with existing UI payloads using stepMyr.
+            self.stepMyr = self.timeIncrementMyr
         if self.plateCount < 4 or self.plateCount > 64:
             raise ValueError("plateCount must be between 4 and 64")
+        if self.targetRuntimeMinutes < 5 or self.targetRuntimeMinutes > 720:
+            raise ValueError("targetRuntimeMinutes must be between 5 and 720")
+        if self.maxPlateVelocityCmYr <= 0:
+            raise ValueError("maxPlateVelocityCmYr must be positive")
         return self
+
+
+class SeedBundle(BaseModel):
+    plates: int
+    boundaries: int
+    events: int
+    terrain: int
 
 
 class PlateFeature(BaseModel):
@@ -38,6 +69,15 @@ class PlateFeature(BaseModel):
     geometry: dict[str, Any]
     validTime: tuple[float, float]
     reconstructionPlateId: int
+
+
+class PlateKinematics(BaseModel):
+    plateId: int
+    velocityCmYr: float
+    azimuthDeg: float
+    convergenceCmYr: float
+    divergenceCmYr: float
+    continuityScore: float
 
 
 class BoundaryType(str, Enum):
@@ -57,6 +97,15 @@ class BoundarySegment(BaseModel):
     geometry: dict[str, Any]
 
 
+class BoundaryKinematics(BaseModel):
+    segmentId: str
+    relativeVelocityCmYr: float
+    normalVelocityCmYr: float
+    tangentialVelocityCmYr: float
+    strainRate: float
+    recommendedBoundaryType: BoundaryType
+
+
 class GeoEventType(str, Enum):
     orogeny = "orogeny"
     rift = "rift"
@@ -71,8 +120,18 @@ class GeoEvent(BaseModel):
     timeStartMa: float
     timeEndMa: float
     intensity: float = Field(ge=0.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0)
+    drivingMetrics: dict[str, float] = Field(default_factory=dict)
+    persistenceClass: Literal["transient", "sustained", "long_lived"] = "transient"
     sourceBoundaryIds: list[str] = Field(default_factory=list)
     regionGeometry: dict[str, Any]
+
+
+class UncertaintySummary(BaseModel):
+    kinematic: float = Field(ge=0.0, le=1.0)
+    event: float = Field(ge=0.0, le=1.0)
+    terrain: float = Field(ge=0.0, le=1.0)
+    coverage: float = Field(ge=0.0, le=1.0)
 
 
 class TimelineFrame(BaseModel):
@@ -80,6 +139,10 @@ class TimelineFrame(BaseModel):
     plateGeometries: list[PlateFeature]
     boundaryGeometries: list[BoundarySegment]
     eventOverlays: list[GeoEvent]
+    plateKinematics: list[PlateKinematics] = Field(default_factory=list)
+    boundaryKinematics: list[BoundaryKinematics] = Field(default_factory=list)
+    strainFieldRef: str | None = None
+    uncertaintySummary: UncertaintySummary
     previewHeightFieldRef: str
 
 
@@ -108,8 +171,13 @@ class ProvenanceRecord(BaseModel):
     seed: int
     engineVersion: str
     modelVersion: str
+    solverMode: SimulationMode
+    rigorProfile: RigorProfile
     parameterHash: str
     eventHash: str
+    kinematicDigest: str
+    uncertaintyDigest: str
+    modelCoverage: float
 
 
 class ProjectSummary(BaseModel):
@@ -148,6 +216,9 @@ class JobSummary(BaseModel):
 
 class GenerateRequest(BaseModel):
     runLabel: str = "default"
+    simulationModeOverride: SimulationMode | None = None
+    rigorProfileOverride: RigorProfile | None = None
+    targetRuntimeMinutesOverride: int | None = None
 
 
 class BookmarkCreateRequest(BaseModel):
@@ -163,7 +234,14 @@ class BookmarkRefineRequest(BaseModel):
 
 class ExpertEdit(BaseModel):
     timeMa: int
-    editType: Literal["rift_start", "boundary_override", "event_boost"]
+    editType: Literal[
+        "rift_initiation",
+        "boundary_override",
+        "subducting_side_override",
+        "event_gain",
+        "rift_start",
+        "event_boost",
+    ]
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -204,6 +282,24 @@ class FrameSummary(BaseModel):
     frame: TimelineFrame
     frameHash: str
     source: Literal["cache", "generated"]
+
+
+class FrameDiagnostics(BaseModel):
+    projectId: str
+    timeMa: int
+    continuityViolations: list[str] = Field(default_factory=list)
+    boundaryConsistencyIssues: list[str] = Field(default_factory=list)
+    coverageGapRatio: float = 0.0
+    warnings: list[str] = Field(default_factory=list)
+    pygplatesStatus: str = "unavailable"
+
+
+class CoverageReport(BaseModel):
+    projectId: str
+    globalCoverageRatio: float
+    coverageRatioByTime: list[dict[str, float]] = Field(default_factory=list)
+    fallbackTimesMa: list[int] = Field(default_factory=list)
+    pygplatesAvailable: bool = False
 
 
 class RefineResult(BaseModel):

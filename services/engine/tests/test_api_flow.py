@@ -20,7 +20,7 @@ def _wait_for_job(client: TestClient, job_id: str, timeout_s: float = 30.0):
     raise TimeoutError(f"job {job_id} did not finish in time")
 
 
-def test_end_to_end_project_flow(tmp_path):
+def test_end_to_end_project_flow_with_diagnostics(tmp_path):
     app = create_app(Settings(data_root=tmp_path))
     client = TestClient(app)
 
@@ -33,21 +33,43 @@ def test_end_to_end_project_flow(tmp_path):
                 "startTimeMa": 100,
                 "endTimeMa": 0,
                 "stepMyr": 1,
+                "timeIncrementMyr": 1,
                 "plateCount": 8,
+                "simulationMode": "fast_plausible",
+                "rigorProfile": "balanced"
             },
         },
     )
     create.raise_for_status()
     project = create.json()
 
-    gen = client.post(f"/v1/projects/{project['projectId']}/generate", json={"runLabel": "test"})
+    gen = client.post(
+        f"/v1/projects/{project['projectId']}/generate",
+        json={
+            "runLabel": "test",
+            "simulationModeOverride": "hybrid_rigor",
+            "rigorProfileOverride": "research",
+            "targetRuntimeMinutesOverride": 120,
+        },
+    )
     gen.raise_for_status()
     gen_job = _wait_for_job(client, gen.json()["jobId"])
     assert gen_job["status"] == "completed"
 
     frame = client.get(f"/v1/projects/{project['projectId']}/frames/50")
     frame.raise_for_status()
-    assert frame.json()["frame"]["timeMa"] == 50
+    frame_payload = frame.json()["frame"]
+    assert frame_payload["timeMa"] == 50
+    assert "plateKinematics" in frame_payload
+    assert "uncertaintySummary" in frame_payload
+
+    diagnostics = client.get(f"/v1/projects/{project['projectId']}/frames/50/diagnostics")
+    diagnostics.raise_for_status()
+    assert diagnostics.json()["projectId"] == project["projectId"]
+
+    coverage = client.get(f"/v1/projects/{project['projectId']}/coverage")
+    coverage.raise_for_status()
+    assert coverage.json()["projectId"] == project["projectId"]
 
     bookmark = client.post(
         f"/v1/projects/{project['projectId']}/bookmarks",
@@ -55,6 +77,20 @@ def test_end_to_end_project_flow(tmp_path):
     )
     bookmark.raise_for_status()
     bookmark_id = bookmark.json()["bookmarkId"]
+
+    edit = client.post(
+        f"/v1/projects/{project['projectId']}/edits",
+        json={
+            "edits": [
+                {
+                    "timeMa": 50,
+                    "editType": "event_gain",
+                    "payload": {"gain": 0.15, "durationMyr": 20},
+                }
+            ]
+        },
+    )
+    edit.raise_for_status()
 
     refine = client.post(
         f"/v1/projects/{project['projectId']}/bookmarks/{bookmark_id}/refine",
@@ -77,7 +113,7 @@ def test_end_to_end_project_flow(tmp_path):
     export.raise_for_status()
     export_job = _wait_for_job(client, export.json()["jobId"])
     assert export_job["status"] == "completed"
-    assert len(export_job["artifacts"]) >= 1
+    assert len(export_job["artifacts"]) >= 2
 
     validation = client.get(f"/v1/projects/{project['projectId']}/validation")
     validation.raise_for_status()

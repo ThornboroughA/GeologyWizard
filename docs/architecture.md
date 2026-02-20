@@ -1,61 +1,47 @@
 # Geologic Wizard Architecture
 
-## Core modules
+## Engine modules
 
-1. Desktop Shell Module (`apps/desktop/src-tauri`)
-- Tauri process and app lifecycle.
-- Command bridge for local secure operations.
+1. `SimulationService` (`services/engine/geologic_wizard_engine/simulation_service.py`)
+- Orchestrates timeline generation, replay, refinement, exports, diagnostics, and coverage reporting.
+- Persists frame caches and run manifests.
 
-2. UI Experience Module (`apps/desktop/src`)
-- Guided setup, timeline scrubber, bookmark workflow.
-- Focused expert panel for constrained tectonic edits.
+2. `Tectonic backends` (`services/engine/geologic_wizard_engine/modules/tectonic_backends.py`)
+- Pluggable modes: `fast_plausible`, `hybrid_rigor`.
+- Coherent plate state evolution with continuity tracking.
+- Boundary kinematics + event synthesis with persistence windows.
 
-3. Map/Globe Module (`apps/desktop/src/components/MapScene.tsx`)
-- Shared frame model feeding 2D and 3D views.
-- Geometry rendering of plate and boundary overlays.
+3. `PyGPlates adapter` (`services/engine/geologic_wizard_engine/modules/pygplates_adapter.py`)
+- Optional runtime binding.
+- Caches Rotation/Reconstruct/Topological model handles when available.
+- Feeds coverage hints into uncertainty/diagnostics.
 
-4. Timeline & Bookmark Module (`apps/desktop/src/components/TimelineScrubber.tsx` + engine bookmark endpoints)
-- Geologic time scrubbing from 1000 Ma to 0 Ma.
-- Bookmark creation and refinement actions.
+4. `Terrain synthesis` (`services/engine/geologic_wizard_engine/modules/terrain_synthesis.py`)
+- Builds uplift/subsidence/volcanic/crust-age potentials.
+- Produces preview heightfield and strain-aware regional refinement.
 
-5. Simulation Orchestrator Module (`services/engine/geologic_wizard_engine/simulation_service.py`)
-- Full-run generation loops.
-- Keyframe cache writing and frame retrieval.
+5. `Validation` (`services/engine/geologic_wizard_engine/modules/validation.py`)
+- Frame invariant checks.
+- Cross-frame continuity checks.
 
-6. PyGPlates Core Integration Layer (scaffold)
-- Current: deterministic synthetic tectonic generator (`modules/tectonics.py`).
-- Intended replacement: PyGPlates reconstruction/topology models and plate partitioning.
+6. `Persistence` (`services/engine/geologic_wizard_engine/project_store.py`, `metadata_store.py`)
+- SQLite metadata.
+- Per-project caches: preview, strain, refined.
+- Run manifests and per-time diagnostics.
 
-7. Tectonic Event Synthesis Module (`modules/tectonics.py`)
-- Derives events from boundary types and expert edits.
+## Key API additions
 
-8. Terrain Synthesis Module (`modules/terrain_synthesis.py`)
-- Generates preview terrain and refined regional terrain arrays.
-
-9. Export Module (`simulation_service.py`)
-- Heightmap artifact output and provenance metadata generation.
-
-10. Persistence & Cache Module (`metadata_store.py`, `project_store.py`)
-- SQLite metadata and deterministic project folder layout.
-- Preview and refined raster cache files.
-
-11. Validation Module (`modules/validation.py`)
-- Reconstruction field checks and boundary consistency checks.
-
-12. Diagnostics Module (`job_manager.py` + job endpoints)
-- Job queue states, progress, and streaming updates.
+- `GET /v1/projects/{projectId}/frames/{timeMa}/diagnostics`
+- `GET /v1/projects/{projectId}/coverage`
+- Generation overrides via `POST /v1/projects/{projectId}/generate`:
+  - `simulationModeOverride`
+  - `rigorProfileOverride`
+  - `targetRuntimeMinutesOverride`
 
 ## Data flow
 
-1. Create project -> persist config and initialize storage.
-2. Generate timeline job -> keyframes written every 5 Myr.
-3. UI scrubs timeline -> frame loaded from cache or generated on demand.
-4. Bookmark -> immutable frame hash references selected time.
-5. Refine bookmark -> regional upres cache output.
-6. Export -> heightmap + metadata JSON with provenance hashes.
-
-## Determinism guarantees
-
-- Config + seed determine synthetic tectonic features and terrain generation.
-- Export metadata records parameter and event hashes.
-- Re-running with identical config and seed yields identical frame payloads.
+1. Create project -> persist config and initialize cache layout.
+2. Generate run -> backend evolves plate states through time and caches keyframes.
+3. Frame request -> read keyframe cache or deterministically replay to target time.
+4. Bookmark refinement -> strain-aware regional upres with global tectonic context frozen at bookmark time.
+5. Export -> 8K-ready heightmap + metadata provenance (solver/profile/kinematics/uncertainty digests).

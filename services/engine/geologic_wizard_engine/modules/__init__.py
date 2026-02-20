@@ -1,1 +1,6 @@
-__all__ = ["tectonics", "terrain_synthesis", "validation"]
+__all__ = [
+    "pygplates_adapter",
+    "tectonic_backends",
+    "terrain_synthesis",
+    "validation",
+]

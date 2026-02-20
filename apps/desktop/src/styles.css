@@ -127,6 +127,12 @@ button:disabled {
   gap: 0.6rem;
 }
 
+.expert-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.45rem;
+}
+
 .muted {
   margin: 0;
   color: var(--ink-soft);
@@ -220,6 +226,21 @@ button:disabled {
 .boundary.transform {
   stroke: #ffe5d0;
   stroke-dasharray: 4 4;
+}
+
+.boundary.uplift-focus {
+  stroke: #ffc46d;
+  stroke-width: 2.7;
+}
+
+.boundary.subsidence-focus {
+  stroke: #89f7d4;
+  stroke-width: 2.7;
+}
+
+.boundary.muted-boundary {
+  stroke: rgba(246, 249, 250, 0.26);
+  stroke-width: 1.2;
 }
 
 .map-empty {
@@ -339,6 +360,21 @@ button:disabled {
   margin: 0.25rem 0;
 }
 
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.8rem;
+  border: 1px solid rgba(19, 34, 48, 0.15);
+  border-radius: 10px;
+  padding: 0.55rem;
+  background: #f8fcfd;
+  font-size: 0.84rem;
+}
+
+.metrics-grid p {
+  margin: 0.2rem 0;
+}
+
 .status-bar {
   display: flex;
   justify-content: space-between;
@@ -353,6 +389,10 @@ button:disabled {
 
 @media (max-width: 1200px) {
   .workspace-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .metrics-grid {
     grid-template-columns: 1fr;
   }
 

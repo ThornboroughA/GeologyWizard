@@ -23,6 +23,7 @@ class ProjectStore:
         ensure_dir(root / "working")
         ensure_dir(root / "exports")
         ensure_dir(root / "cache" / "preview")
+        ensure_dir(root / "cache" / "strain")
         ensure_dir(root / "cache" / "refined")
         ensure_dir(root / "tectonics")
         self.write_json(root / "working" / "config.json", config_json)
@@ -34,6 +35,7 @@ class ProjectStore:
     def run_dir(self, project_id: str, run_id: str) -> Path:
         run_root = ensure_dir(self.project_dir(project_id) / "runs" / run_id)
         ensure_dir(run_root / "frames")
+        ensure_dir(run_root / "diagnostics")
         return run_root
 
     def frame_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
@@ -60,6 +62,9 @@ class ProjectStore:
     def preview_array_path(self, project_id: str, time_ma: int) -> Path:
         return self.project_dir(project_id) / "cache" / "preview" / f"{time_ma}.npy"
 
+    def strain_array_path(self, project_id: str, time_ma: int) -> Path:
+        return self.project_dir(project_id) / "cache" / "strain" / f"{time_ma}.npy"
+
     def refined_array_path(self, project_id: str, bookmark_id: str, refinement_level: int) -> Path:
         return self.project_dir(project_id) / "cache" / "refined" / f"{bookmark_id}_L{refinement_level}.npy"
 
@@ -76,3 +81,20 @@ class ProjectStore:
 
     def metadata_path(self, project_id: str, artifact_id: str) -> Path:
         return self.project_dir(project_id) / "exports" / f"{artifact_id}.metadata.json"
+
+    def run_manifest_path(self, project_id: str, run_id: str) -> Path:
+        return self.run_dir(project_id, run_id) / "manifest.json"
+
+    def run_diagnostics_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
+        return self.run_dir(project_id, run_id) / "diagnostics" / f"{time_ma}.json"
+
+    def write_run_diagnostics(self, project_id: str, run_id: str, time_ma: int, payload: dict[str, Any]) -> Path:
+        path = self.run_diagnostics_path(project_id, run_id, time_ma)
+        self.write_json(path, payload)
+        return path
+
+    def read_run_diagnostics(self, project_id: str, run_id: str, time_ma: int) -> dict[str, Any] | None:
+        path = self.run_diagnostics_path(project_id, run_id, time_ma)
+        if not path.exists():
+            return None
+        return self.read_json(path)

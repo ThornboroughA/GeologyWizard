@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from datetime import datetime, timezone
 from typing import AsyncGenerator
 
 from fastapi import FastAPI, HTTPException
@@ -16,8 +15,10 @@ from .models import (
     Bookmark,
     BookmarkCreateRequest,
     BookmarkRefineRequest,
+    CoverageReport,
     ExpertEditRequest,
     ExportRequest,
+    FrameDiagnostics,
     FrameSummary,
     GenerateRequest,
     JobStatus,
@@ -32,10 +33,6 @@ from .simulation_service import SimulationService
 from .utils import stable_hash
 
 
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
     metadata = MetadataStore(settings.data_root / "metadata.sqlite3")
@@ -43,7 +40,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     simulation = SimulationService(settings, metadata, project_store)
     jobs = JobManager(metadata)
 
-    app = FastAPI(title="Geologic Wizard Engine", version="0.1.0")
+    app = FastAPI(title="Geologic Wizard Engine", version="0.2.0")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -65,13 +62,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def create_project(request: ProjectCreateRequest) -> ProjectSummary:
         project_id = str(uuid.uuid4())
         project_store.initialize_project(project_id, request.config.model_dump(mode="json"))
-        project_hash = stable_hash(request.config.model_dump(mode="json"))
         return metadata.create_project(
             project_id=project_id,
             name=request.name,
             config=request.config,
-            project_hash=project_hash,
-            created_at=_utc_now_iso(),
+            project_hash=stable_hash(request.config.model_dump(mode="json")),
+            created_at=simulation.utc_now_iso(),
         )
 
     @app.get("/v1/projects/{project_id}", response_model=ProjectSummary)
@@ -92,6 +88,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         def run(job_id: str) -> None:
             run_id = simulation.generate_project(
                 project_id,
+                simulation_mode_override=request.simulationModeOverride.value if request.simulationModeOverride else None,
+                rigor_profile_override=request.rigorProfileOverride.value if request.rigorProfileOverride else None,
+                runtime_override=request.targetRuntimeMinutesOverride,
                 job_callback=lambda progress, message: jobs.set_state(job_id, progress=progress, message=message),
                 is_canceled=lambda: jobs.is_canceled(job_id),
             )
@@ -114,6 +113,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if time_ma < project.config.endTimeMa or time_ma > project.config.startTimeMa:
             raise HTTPException(status_code=400, detail="time out of project range")
         return simulation.get_or_create_frame(project, time_ma)
+
+    @app.get("/v1/projects/{project_id}/frames/{time_ma}/diagnostics", response_model=FrameDiagnostics)
+    def get_frame_diagnostics(project_id: str, time_ma: int) -> FrameDiagnostics:
+        project = metadata.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        try:
+            return simulation.get_frame_diagnostics(project_id, time_ma)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/v1/projects/{project_id}/coverage", response_model=CoverageReport)
+    def get_coverage(project_id: str) -> CoverageReport:
+        project = metadata.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        return simulation.get_coverage_report(project_id)
 
     @app.post("/v1/projects/{project_id}/bookmarks", response_model=Bookmark)
     def create_bookmark(project_id: str, request: BookmarkCreateRequest) -> Bookmark:
@@ -184,7 +200,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     project_id=project_id,
                     job_id=job_id,
                     artifact=artifact.model_dump(mode="json"),
-                    created_at=_utc_now_iso(),
+                    created_at=simulation.utc_now_iso(),
                 )
 
         jobs.submit(job.jobId, run)

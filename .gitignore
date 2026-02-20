@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.pyd
 *.so
+*.egg-info/
 .venv/
 .pytest_cache/
 

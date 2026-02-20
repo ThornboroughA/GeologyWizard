@@ -1,4 +1,6 @@
 export type FidelityPreset = "kinematic_rules" | "high_physics" | "procedural_light";
+export type SimulationMode = "fast_plausible" | "hybrid_rigor";
+export type RigorProfile = "balanced" | "research";
 
 export interface PolygonGeometry {
   type: "Polygon";
@@ -15,9 +17,14 @@ export interface ProjectConfig {
   startTimeMa: number;
   endTimeMa: number;
   stepMyr: number;
+  timeIncrementMyr: number;
   planetRadiusKm: number;
   plateCount: number;
   fidelityPreset: FidelityPreset;
+  simulationMode: SimulationMode;
+  rigorProfile: RigorProfile;
+  targetRuntimeMinutes: number;
+  maxPlateVelocityCmYr: number;
   anchorPlateId?: number | null;
 }
 
@@ -39,6 +46,15 @@ export interface PlateFeature {
   reconstructionPlateId: number;
 }
 
+export interface PlateKinematics {
+  plateId: number;
+  velocityCmYr: number;
+  azimuthDeg: number;
+  convergenceCmYr: number;
+  divergenceCmYr: number;
+  continuityScore: number;
+}
+
 export interface BoundarySegment {
   segmentId: string;
   leftPlateId: number;
@@ -50,14 +66,33 @@ export interface BoundarySegment {
   geometry: LineStringGeometry;
 }
 
+export interface BoundaryKinematics {
+  segmentId: string;
+  relativeVelocityCmYr: number;
+  normalVelocityCmYr: number;
+  tangentialVelocityCmYr: number;
+  strainRate: number;
+  recommendedBoundaryType: "convergent" | "divergent" | "transform";
+}
+
 export interface GeoEvent {
   eventId: string;
   eventType: "orogeny" | "rift" | "subduction" | "arc" | "terrane";
   timeStartMa: number;
   timeEndMa: number;
   intensity: number;
+  confidence: number;
+  drivingMetrics: Record<string, number>;
+  persistenceClass: "transient" | "sustained" | "long_lived";
   sourceBoundaryIds: string[];
   regionGeometry: LineStringGeometry | PolygonGeometry;
+}
+
+export interface UncertaintySummary {
+  kinematic: number;
+  event: number;
+  terrain: number;
+  coverage: number;
 }
 
 export interface TimelineFrame {
@@ -65,6 +100,10 @@ export interface TimelineFrame {
   plateGeometries: PlateFeature[];
   boundaryGeometries: BoundarySegment[];
   eventOverlays: GeoEvent[];
+  plateKinematics: PlateKinematics[];
+  boundaryKinematics: BoundaryKinematics[];
+  strainFieldRef?: string | null;
+  uncertaintySummary: UncertaintySummary;
   previewHeightFieldRef: string;
 }
 
@@ -72,6 +111,24 @@ export interface FrameSummary {
   frame: TimelineFrame;
   frameHash: string;
   source: "cache" | "generated";
+}
+
+export interface FrameDiagnostics {
+  projectId: string;
+  timeMa: number;
+  continuityViolations: string[];
+  boundaryConsistencyIssues: string[];
+  coverageGapRatio: number;
+  warnings: string[];
+  pygplatesStatus: string;
+}
+
+export interface CoverageReport {
+  projectId: string;
+  globalCoverageRatio: number;
+  coverageRatioByTime: Array<{ timeMa: number; coverageRatio: number }>;
+  fallbackTimesMa: number[];
+  pygplatesAvailable: boolean;
 }
 
 export interface Bookmark {

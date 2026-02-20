@@ -1,9 +1,13 @@
 import type {
   Bookmark,
+  CoverageReport,
+  FrameDiagnostics,
   FrameSummary,
   JobSummary,
   ProjectConfig,
   ProjectSummary,
+  RigorProfile,
+  SimulationMode,
   ValidationReport
 } from "../types";
 
@@ -36,15 +40,33 @@ export function createProject(name: string, config: ProjectConfig): Promise<Proj
   });
 }
 
-export function generateProject(projectId: string): Promise<JobSummary> {
+export function generateProject(
+  projectId: string,
+  options?: {
+    simulationModeOverride?: SimulationMode;
+    rigorProfileOverride?: RigorProfile;
+    targetRuntimeMinutesOverride?: number;
+  }
+): Promise<JobSummary> {
   return request<JobSummary>(`/v1/projects/${projectId}/generate`, {
     method: "POST",
-    body: JSON.stringify({ runLabel: "ui" })
+    body: JSON.stringify({
+      runLabel: "ui",
+      ...(options ?? {})
+    })
   });
 }
 
 export function getFrame(projectId: string, timeMa: number): Promise<FrameSummary> {
   return request<FrameSummary>(`/v1/projects/${projectId}/frames/${timeMa}`);
+}
+
+export function getFrameDiagnostics(projectId: string, timeMa: number): Promise<FrameDiagnostics> {
+  return request<FrameDiagnostics>(`/v1/projects/${projectId}/frames/${timeMa}/diagnostics`);
+}
+
+export function getCoverage(projectId: string): Promise<CoverageReport> {
+  return request<CoverageReport>(`/v1/projects/${projectId}/coverage`);
 }
 
 export function createBookmark(projectId: string, timeMa: number, label: string): Promise<Bookmark> {
