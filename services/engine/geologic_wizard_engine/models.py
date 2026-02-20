@@ -21,6 +21,16 @@ class RigorProfile(str, Enum):
     research = "research"
 
 
+class SolverVersion(str, Enum):
+    tectonic_hybrid_backends_v1 = "tectonic_hybrid_backends_v1"
+    tectonic_state_v2 = "tectonic_state_v2"
+
+
+class QualityMode(str, Enum):
+    quick = "quick"
+    full = "full"
+
+
 class ProjectConfig(BaseModel):
     seed: int = 42
     startTimeMa: int = 1000
@@ -35,6 +45,13 @@ class ProjectConfig(BaseModel):
     targetRuntimeMinutes: int = 60
     maxPlateVelocityCmYr: float = 14.0
     anchorPlateId: int | None = None
+    solverVersion: SolverVersion = SolverVersion.tectonic_hybrid_backends_v1
+    coreGridWidth: int | None = None
+    coreGridHeight: int | None = None
+    supercontinentBiasStrength: float = 0.5
+    processProfiles: dict[str, Any] = Field(default_factory=dict)
+    enableLifecycleChecks: bool = True
+    highDetailWindowMyr: int = 30
 
     @model_validator(mode="after")
     def validate_range(self) -> "ProjectConfig":
@@ -53,6 +70,19 @@ class ProjectConfig(BaseModel):
             raise ValueError("targetRuntimeMinutes must be between 5 and 720")
         if self.maxPlateVelocityCmYr <= 0:
             raise ValueError("maxPlateVelocityCmYr must be positive")
+        if self.supercontinentBiasStrength < 0 or self.supercontinentBiasStrength > 1:
+            raise ValueError("supercontinentBiasStrength must be between 0 and 1")
+        if self.highDetailWindowMyr < 10 or self.highDetailWindowMyr > 100:
+            raise ValueError("highDetailWindowMyr must be between 10 and 100")
+        if self.solverVersion == SolverVersion.tectonic_state_v2:
+            if self.coreGridWidth is None:
+                self.coreGridWidth = 720 if self.simulationMode == SimulationMode.hybrid_rigor else 512
+            if self.coreGridHeight is None:
+                self.coreGridHeight = 360 if self.simulationMode == SimulationMode.hybrid_rigor else 256
+        if self.coreGridWidth is not None and self.coreGridWidth < 128:
+            raise ValueError("coreGridWidth must be at least 128")
+        if self.coreGridHeight is not None and self.coreGridHeight < 64:
+            raise ValueError("coreGridHeight must be at least 64")
         return self
 
 
@@ -84,6 +114,16 @@ class BoundaryType(str, Enum):
     convergent = "convergent"
     divergent = "divergent"
     transform = "transform"
+
+
+class BoundaryStateClass(str, Enum):
+    ridge = "ridge"
+    rift = "rift"
+    transform = "transform"
+    subduction = "subduction"
+    collision = "collision"
+    passive_margin = "passive_margin"
+    suture = "suture"
 
 
 class BoundarySegment(BaseModel):
@@ -127,6 +167,32 @@ class GeoEvent(BaseModel):
     regionGeometry: dict[str, Any]
 
 
+class BoundaryStateRecord(BaseModel):
+    segmentId: str
+    stateClass: BoundaryStateClass
+    lastTransitionMa: int
+    typePersistenceMyr: int
+    polarityFlipCount: int = 0
+    transitionCount: int = 0
+    subductionFlux: float = 0.0
+    averageOceanicAgeMyr: float = 0.0
+    motionMismatch: bool = False
+
+
+class PlateLifecycleState(BaseModel):
+    unexplainedPlateBirths: int = 0
+    unexplainedPlateDeaths: int = 0
+    netAreaBalanceError: float = 0.0
+    continentalAreaFraction: float = 0.0
+    oceanicAreaFraction: float = 0.0
+    oceanicAgeP99Myr: float = 0.0
+    supercontinentPhase: Literal["assembly", "dispersal", "stable", "assembled"] = "stable"
+    supercontinentLargestClusterFraction: float = 0.0
+    supercontinentCycleCount: int = 0
+    shortLivedOrogenyCount: int = 0
+    uncoupledVolcanicBelts: int = 0
+
+
 class UncertaintySummary(BaseModel):
     kinematic: float = Field(ge=0.0, le=1.0)
     event: float = Field(ge=0.0, le=1.0)
@@ -141,7 +207,13 @@ class TimelineFrame(BaseModel):
     eventOverlays: list[GeoEvent]
     plateKinematics: list[PlateKinematics] = Field(default_factory=list)
     boundaryKinematics: list[BoundaryKinematics] = Field(default_factory=list)
+    boundaryStates: list[BoundaryStateRecord] = Field(default_factory=list)
+    plateLifecycleState: PlateLifecycleState | None = None
     strainFieldRef: str | None = None
+    oceanicAgeFieldRef: str | None = None
+    crustTypeFieldRef: str | None = None
+    crustThicknessFieldRef: str | None = None
+    tectonicPotentialFieldRef: str | None = None
     uncertaintySummary: UncertaintySummary
     previewHeightFieldRef: str
 
@@ -189,6 +261,14 @@ class ProvenanceRecord(BaseModel):
     kinematicDigest: str
     uncertaintyDigest: str
     modelCoverage: float
+    solverVersion: SolverVersion = SolverVersion.tectonic_hybrid_backends_v1
+    coefficientsDigest: str = ""
+    transitionRulesDigest: str = ""
+    diagnosticProfileDigest: str = ""
+    macroDigest: str = ""
+    qualityMode: QualityMode = QualityMode.quick
+    sourceQuickRunId: str | None = None
+    surfaceProfileDigest: str = ""
 
 
 class ProjectSummary(BaseModel):
@@ -199,6 +279,8 @@ class ProjectSummary(BaseModel):
     updatedAt: str
     projectHash: str
     currentRunId: str | None = None
+    latestQuickRunId: str | None = None
+    latestFullRunId: str | None = None
 
 
 class ProjectCreateRequest(BaseModel):
@@ -230,6 +312,8 @@ class GenerateRequest(BaseModel):
     simulationModeOverride: SimulationMode | None = None
     rigorProfileOverride: RigorProfile | None = None
     targetRuntimeMinutesOverride: int | None = None
+    qualityMode: QualityMode = QualityMode.quick
+    sourceQuickRunId: str | None = None
 
 
 class BookmarkCreateRequest(BaseModel):
@@ -278,7 +362,7 @@ class ExportRequest(BaseModel):
 
 class ValidationIssue(BaseModel):
     code: str
-    severity: Literal["error", "warning"]
+    severity: Literal["error", "warning", "info"]
     message: str
     details: dict[str, Any] = Field(default_factory=dict)
 
@@ -311,6 +395,9 @@ class FrameRender(BaseModel):
     landmassGeoJson: GeoJsonFeatureCollection
     boundaryGeoJson: GeoJsonFeatureCollection
     overlayGeoJson: GeoJsonFeatureCollection
+    coastlineGeoJson: GeoJsonFeatureCollection = Field(default_factory=GeoJsonFeatureCollection)
+    activeBeltsGeoJson: GeoJsonFeatureCollection = Field(default_factory=GeoJsonFeatureCollection)
+    reliefFieldRef: str | None = None
     source: Literal["cache", "generated"]
     nearestTimeMa: int
 
@@ -342,6 +429,27 @@ class FrameDiagnostics(BaseModel):
     coverageGapRatio: float = 0.0
     warnings: list[str] = Field(default_factory=list)
     pygplatesStatus: str = "unavailable"
+    metrics: dict[str, float] = Field(default_factory=dict)
+    checkIds: list[str] = Field(default_factory=list)
+
+
+class PlausibilityCheck(BaseModel):
+    checkId: str
+    severity: Literal["error", "warning", "info"]
+    timeRangeMa: tuple[int, int]
+    regionOrPlateIds: list[str] = Field(default_factory=list)
+    observedValue: float | int | str
+    expectedRangeOrRule: str
+    explanation: str
+    suggestedFix: str
+
+
+class PlausibilityReport(BaseModel):
+    projectId: str
+    runId: str | None = None
+    checkedAt: str = Field(default_factory=utc_now_iso)
+    checks: list[PlausibilityCheck] = Field(default_factory=list)
+    summary: dict[str, int] = Field(default_factory=dict)
 
 
 class CoverageReport(BaseModel):

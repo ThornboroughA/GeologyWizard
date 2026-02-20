@@ -5,8 +5,10 @@ import type {
   FrameRangeResponse,
   FrameSummary,
   JobSummary,
+  PlausibilityReport,
   ProjectConfig,
   ProjectSummary,
+  QualityMode,
   TimelineFrameRender,
   TimelineIndex,
   RigorProfile,
@@ -43,15 +45,51 @@ export function createProject(name: string, config: ProjectConfig): Promise<Proj
   });
 }
 
+export function createProjectV2(name: string, config: ProjectConfig): Promise<ProjectSummary> {
+  return request<ProjectSummary>("/v2/projects", {
+    method: "POST",
+    body: JSON.stringify({ name, config })
+  });
+}
+
+export function getProject(projectId: string): Promise<ProjectSummary> {
+  return request<ProjectSummary>(`/v1/projects/${projectId}`);
+}
+
+export function getProjectV2(projectId: string): Promise<ProjectSummary> {
+  return request<ProjectSummary>(`/v2/projects/${projectId}`);
+}
+
 export function generateProject(
   projectId: string,
   options?: {
     simulationModeOverride?: SimulationMode;
     rigorProfileOverride?: RigorProfile;
     targetRuntimeMinutesOverride?: number;
+    qualityMode?: QualityMode;
+    sourceQuickRunId?: string;
   }
 ): Promise<JobSummary> {
   return request<JobSummary>(`/v1/projects/${projectId}/generate`, {
+    method: "POST",
+    body: JSON.stringify({
+      runLabel: "ui",
+      ...(options ?? {})
+    })
+  });
+}
+
+export function generateProjectV2(
+  projectId: string,
+  options?: {
+    simulationModeOverride?: SimulationMode;
+    rigorProfileOverride?: RigorProfile;
+    targetRuntimeMinutesOverride?: number;
+    qualityMode?: QualityMode;
+    sourceQuickRunId?: string;
+  }
+): Promise<JobSummary> {
+  return request<JobSummary>(`/v2/projects/${projectId}/generate`, {
     method: "POST",
     body: JSON.stringify({
       runLabel: "ui",
@@ -66,14 +104,32 @@ export function getFrame(projectId: string, timeMa: number, signal?: AbortSignal
   });
 }
 
+export function getFrameV2(projectId: string, timeMa: number, signal?: AbortSignal): Promise<FrameSummary> {
+  return request<FrameSummary>(`/v2/projects/${projectId}/frames/${timeMa}`, {
+    signal
+  });
+}
+
 export function getFrameDiagnostics(projectId: string, timeMa: number, signal?: AbortSignal): Promise<FrameDiagnostics> {
   return request<FrameDiagnostics>(`/v1/projects/${projectId}/frames/${timeMa}/diagnostics`, {
     signal
   });
 }
 
+export function getFrameDiagnosticsV2(projectId: string, timeMa: number, signal?: AbortSignal): Promise<FrameDiagnostics> {
+  return request<FrameDiagnostics>(`/v2/projects/${projectId}/frames/${timeMa}/diagnostics`, {
+    signal
+  });
+}
+
 export function getTimelineIndex(projectId: string, signal?: AbortSignal): Promise<TimelineIndex> {
   return request<TimelineIndex>(`/v1/projects/${projectId}/timeline-index`, {
+    signal
+  });
+}
+
+export function getTimelineIndexV2(projectId: string, signal?: AbortSignal): Promise<TimelineIndex> {
+  return request<TimelineIndex>(`/v2/projects/${projectId}/timeline-index`, {
     signal
   });
 }
@@ -101,12 +157,54 @@ export function getFramesRange(
   });
 }
 
+export function getFramesRangeV2(
+  projectId: string,
+  options: {
+    timeFrom: number;
+    timeTo: number;
+    step?: number;
+    detail?: "render" | "full";
+    exact?: boolean;
+  },
+  signal?: AbortSignal
+): Promise<FrameRangeResponse> {
+  const params = new URLSearchParams({
+    time_from: String(options.timeFrom),
+    time_to: String(options.timeTo),
+    step: String(options.step ?? 1),
+    detail: options.detail ?? "render",
+    exact: String(Boolean(options.exact))
+  });
+  return request<FrameRangeResponse>(`/v2/projects/${projectId}/frames?${params.toString()}`, {
+    signal
+  });
+}
+
 export async function getRenderFrame(
   projectId: string,
   timeMa: number,
   options?: { exact?: boolean; signal?: AbortSignal }
 ): Promise<TimelineFrameRender> {
   const response = await getFramesRange(
+    projectId,
+    {
+      timeFrom: timeMa,
+      timeTo: timeMa,
+      step: 1,
+      detail: "render",
+      exact: options?.exact ?? false
+    },
+    options?.signal
+  );
+  return response.renderFrames[0];
+}
+
+export async function getRenderFrameV2(
+  projectId: string,
+  timeMa: number,
+  options?: { exact?: boolean; signal?: AbortSignal }
+): Promise<TimelineFrameRender> {
+  const response = await getFramesRangeV2(
     projectId,
     {
       timeFrom: timeMa,
@@ -168,4 +266,8 @@ export function getJob(jobId: string): Promise<JobSummary> {
 
 export function getValidation(projectId: string): Promise<ValidationReport> {
   return request<ValidationReport>(`/v1/projects/${projectId}/validation`);
+}
+
+export function getPlausibilityV2(projectId: string): Promise<PlausibilityReport> {
+  return request<PlausibilityReport>(`/v2/projects/${projectId}/plausibility`);
 }

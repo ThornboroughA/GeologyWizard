@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..models import TimelineFrame, ValidationIssue
+from ..models import PlausibilityCheck, TimelineFrame, ValidationIssue
 
 
 def validate_frame(frame: TimelineFrame) -> list[ValidationIssue]:
@@ -61,6 +61,36 @@ def validate_frame(frame: TimelineFrame) -> list[ValidationIssue]:
             )
         )
 
+    if frame.plateLifecycleState is not None:
+        if frame.plateLifecycleState.netAreaBalanceError > 0.01:
+            issues.append(
+                ValidationIssue(
+                    code="lifecycle_area_balance_error",
+                    severity="error",
+                    message="Lifecycle area balance exceeded tolerance (1%)",
+                    details={"netAreaBalanceError": frame.plateLifecycleState.netAreaBalanceError},
+                )
+            )
+        if frame.plateLifecycleState.oceanicAgeP99Myr > 280:
+            issues.append(
+                ValidationIssue(
+                    code="oceanic_age_outlier",
+                    severity="warning",
+                    message="Oceanic age p99 exceeds Earth-like heuristic range",
+                    details={"oceanicAgeP99Myr": frame.plateLifecycleState.oceanicAgeP99Myr},
+                )
+            )
+
+    for boundary_state in frame.boundaryStates:
+        if boundary_state.motionMismatch:
+            issues.append(
+                ValidationIssue(
+                    code="boundary_motion_mismatch",
+                    severity="error",
+                    message=f"Boundary {boundary_state.segmentId} state class mismatches relative motion",
+                )
+            )
+
     return issues
 
 
@@ -78,13 +108,33 @@ def validate_frame_pair(previous: TimelineFrame | None, current: TimelineFrame) 
             continue
 
         speed_jump = abs(kin.velocityCmYr - old.velocityCmYr)
-        if speed_jump > 4.0:
+        if speed_jump > 5.0:
             issues.append(
                 ValidationIssue(
-                    code="continuity_speed_jump",
-                    severity="warning",
-                    message=f"Plate {plate_id} has abrupt velocity change ({speed_jump:.2f} cm/yr)",
+                    code="continuity_speed_jump_error",
+                    severity="error",
+                    message=f"Plate {plate_id} exceeds max velocity jump ({speed_jump:.2f} cm/yr)",
                     details={"plateId": plate_id, "speedJumpCmYr": round(speed_jump, 4)},
+                )
+            )
+        elif speed_jump > 2.0:
+            issues.append(
+                ValidationIssue(
+                    code="continuity_speed_jump_warning",
+                    severity="warning",
+                    message=f"Plate {plate_id} has elevated velocity jump ({speed_jump:.2f} cm/yr)",
+                    details={"plateId": plate_id, "speedJumpCmYr": round(speed_jump, 4)},
+                )
+            )
+
+        azimuth_jump = abs(((kin.azimuthDeg - old.azimuthDeg + 180.0) % 360.0) - 180.0)
+        if azimuth_jump > 55.0:
+            issues.append(
+                ValidationIssue(
+                    code="continuity_rotation_outlier",
+                    severity="warning",
+                    message=f"Plate {plate_id} has abrupt azimuth rotation ({azimuth_jump:.1f}°)",
+                    details={"plateId": plate_id, "azimuthJumpDeg": round(azimuth_jump, 4)},
                 )
             )
 
@@ -99,3 +149,68 @@ def validate_frame_pair(previous: TimelineFrame | None, current: TimelineFrame) 
             )
 
     return issues
+
+
+def build_plausibility_checks_from_frame(frame: TimelineFrame) -> list[PlausibilityCheck]:
+    checks: list[PlausibilityCheck] = []
+
+    max_velocity_jump = max([abs(item.convergenceCmYr - item.divergenceCmYr) for item in frame.plateKinematics] + [0.0])
+    checks.append(
+        PlausibilityCheck(
+            checkId="continuity.max_velocity_jump_cm_per_yr",
+            severity="warning" if max_velocity_jump > 2.0 else "info",
+            timeRangeMa=(frame.timeMa, frame.timeMa),
+            regionOrPlateIds=[f"plate:{item.plateId}" for item in frame.plateKinematics[:8]],
+            observedValue=round(max_velocity_jump, 4),
+            expectedRangeOrRule="warn > 2.0, error > 5.0",
+            explanation="Frame-local proxy for abrupt kinematic change.",
+            suggestedFix="Smooth force transitions or raise persistence hysteresis.",
+        )
+    )
+
+    mismatch_count = sum(1 for item in frame.boundaryStates if item.motionMismatch)
+    checks.append(
+        PlausibilityCheck(
+            checkId="boundary.motion_mismatch_count",
+            severity="error" if mismatch_count > 0 else "info",
+            timeRangeMa=(frame.timeMa, frame.timeMa),
+            regionOrPlateIds=[f"boundary:{item.segmentId}" for item in frame.boundaryStates if item.motionMismatch][:8],
+            observedValue=mismatch_count,
+            expectedRangeOrRule="must equal 0",
+            explanation="Boundary class should match motion style.",
+            suggestedFix="Fix semantic transition thresholds and polarity constraints.",
+        )
+    )
+
+    if frame.plateLifecycleState is not None:
+        checks.append(
+            PlausibilityCheck(
+                checkId="lifecycle.net_area_balance_error",
+                severity="error" if frame.plateLifecycleState.netAreaBalanceError > 0.01 else "info",
+                timeRangeMa=(frame.timeMa, frame.timeMa),
+                observedValue=frame.plateLifecycleState.netAreaBalanceError,
+                expectedRangeOrRule="error > 0.01",
+                explanation="Net area closure error for lifecycle raster update.",
+                suggestedFix="Normalize crust-type transitions after lifecycle update.",
+            )
+        )
+        checks.append(
+            PlausibilityCheck(
+                checkId="events.short_lived_orogeny_count",
+                severity="warning" if frame.plateLifecycleState.shortLivedOrogenyCount > 0 else "info",
+                timeRangeMa=(frame.timeMa, frame.timeMa),
+                observedValue=frame.plateLifecycleState.shortLivedOrogenyCount,
+                expectedRangeOrRule="warn when > 0 for duration < 10 Myr",
+                explanation="Orogenies should persist over geologic timescales.",
+                suggestedFix="Increase collision persistence and decay windows.",
+            )
+        )
+
+    return checks
+
+
+def summarize_check_severity(checks: list[PlausibilityCheck]) -> dict[str, int]:
+    summary = {"error": 0, "warning": 0, "info": 0}
+    for check in checks:
+        summary[check.severity] = summary.get(check.severity, 0) + 1
+    return summary

@@ -189,3 +189,23 @@ def synthesize_refined_region(
 
     refined = expanded + 0.08 * detail
     return _normalize(refined).astype(np.float32)
+
+
+def synthesize_preview_height_v2(
+    *,
+    previous_height: np.ndarray,
+    uplift_rate: np.ndarray,
+    subsidence_rate: np.ndarray,
+    volcanic_flux: np.ndarray,
+    erosion_capacity: np.ndarray,
+    orogenic_root: np.ndarray,
+    step_myr: int,
+) -> np.ndarray:
+    # Process-coupled terrain evolution: H(t+dt) = H(t) + uplift - subsidence - erosion(H, slope).
+    slope_y, slope_x = np.gradient(previous_height)
+    slope = np.sqrt((slope_x * slope_x) + (slope_y * slope_y))
+    erosion = np.clip(erosion_capacity * slope * (0.2 + 0.015 * step_myr), 0.0, 0.08)
+    uplift = np.clip(uplift_rate + orogenic_root * 0.1 + volcanic_flux * 0.22, 0.0, 0.2)
+    subsidence = np.clip(subsidence_rate * (1.05 + 0.01 * step_myr), 0.0, 0.18)
+    updated = np.clip(previous_height + uplift - subsidence - erosion, 0.0, 1.0)
+    return updated.astype(np.float32)

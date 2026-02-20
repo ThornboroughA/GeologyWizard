@@ -33,7 +33,9 @@ class MetadataStore:
                     project_hash TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    current_run_id TEXT
+                    current_run_id TEXT,
+                    latest_quick_run_id TEXT,
+                    latest_full_run_id TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS jobs (
@@ -78,6 +80,11 @@ class MetadataStore:
                 );
                 """
             )
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
+            if "latest_quick_run_id" not in columns:
+                conn.execute("ALTER TABLE projects ADD COLUMN latest_quick_run_id TEXT")
+            if "latest_full_run_id" not in columns:
+                conn.execute("ALTER TABLE projects ADD COLUMN latest_full_run_id TEXT")
 
     def create_project(
         self,
@@ -87,12 +94,12 @@ class MetadataStore:
         project_hash: str,
         created_at: str,
     ) -> ProjectSummary:
-        payload = (project_id, name, config.model_dump_json(), project_hash, created_at, created_at, None)
+        payload = (project_id, name, config.model_dump_json(), project_hash, created_at, created_at, None, None, None)
         with self._lock, self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO projects(id, name, config_json, project_hash, created_at, updated_at, current_run_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO projects(id, name, config_json, project_hash, created_at, updated_at, current_run_id, latest_quick_run_id, latest_full_run_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 payload,
             )
@@ -104,6 +111,8 @@ class MetadataStore:
             updatedAt=created_at,
             projectHash=project_hash,
             currentRunId=None,
+            latestQuickRunId=None,
+            latestFullRunId=None,
         )
 
     def get_project(self, project_id: str) -> ProjectSummary | None:
@@ -123,14 +132,35 @@ class MetadataStore:
             updatedAt=row["updated_at"],
             projectHash=row["project_hash"],
             currentRunId=row["current_run_id"],
+            latestQuickRunId=row["latest_quick_run_id"] if "latest_quick_run_id" in row.keys() else None,
+            latestFullRunId=row["latest_full_run_id"] if "latest_full_run_id" in row.keys() else None,
         )
 
-    def set_project_run(self, project_id: str, run_id: str, updated_at: str) -> None:
+    def set_project_run(self, project_id: str, run_id: str, updated_at: str, quality_mode: str | None = None) -> None:
         with self._lock, self._connect() as conn:
-            conn.execute(
-                "UPDATE projects SET current_run_id = ?, updated_at = ? WHERE id = ?",
-                (run_id, updated_at, project_id),
-            )
+            if quality_mode == "quick":
+                conn.execute(
+                    """
+                    UPDATE projects
+                    SET current_run_id = ?, latest_quick_run_id = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (run_id, run_id, updated_at, project_id),
+                )
+            elif quality_mode == "full":
+                conn.execute(
+                    """
+                    UPDATE projects
+                    SET current_run_id = ?, latest_full_run_id = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (run_id, run_id, updated_at, project_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE projects SET current_run_id = ?, updated_at = ? WHERE id = ?",
+                    (run_id, updated_at, project_id),
+                )
 
     def create_job(self, job: JobSummary, created_at: str) -> None:
         with self._lock, self._connect() as conn:

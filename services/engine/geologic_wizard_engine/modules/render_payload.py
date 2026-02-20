@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from ..models import FrameRender, GeoJsonFeature, GeoJsonFeatureCollection, TimelineFrame
 
@@ -178,9 +181,133 @@ def wrap_geometry(geometry: dict[str, Any]) -> dict[str, Any]:
     return geometry
 
 
+def _cell_bounds(col: int, row: int, width: int, height: int) -> tuple[float, float, float, float]:
+    lon_min = -180.0 + (float(col) / float(width)) * 360.0
+    lon_max = -180.0 + (float(col + 1) / float(width)) * 360.0
+    lat_max = 90.0 - (float(row) / float(height)) * 180.0
+    lat_min = 90.0 - (float(row + 1) / float(height)) * 180.0
+    return lon_min, lon_max, lat_min, lat_max
+
+
+def _build_landmask(frame: TimelineFrame) -> tuple[np.ndarray, np.ndarray] | None:
+    preview_path = Path(frame.previewHeightFieldRef) if frame.previewHeightFieldRef else None
+    if preview_path is None or not preview_path.exists():
+        return None
+    try:
+        preview = np.load(preview_path)
+    except Exception:
+        return None
+
+    crust = None
+    if frame.crustTypeFieldRef:
+        crust_path = Path(frame.crustTypeFieldRef)
+        if crust_path.exists():
+            try:
+                crust = np.load(crust_path)
+            except Exception:
+                crust = None
+
+    if crust is not None and crust.shape == preview.shape:
+        land = np.logical_or(crust > 0, preview >= 0.57)
+    else:
+        land = preview >= 0.53
+
+    stride = max(1, int(max(land.shape[0], land.shape[1]) / 240))
+    return land[::stride, ::stride], preview[::stride, ::stride]
+
+
+def _surface_landmass_features(mask: np.ndarray, relief: np.ndarray, frame: TimelineFrame) -> list[GeoJsonFeature]:
+    height, width = mask.shape
+    features: list[GeoJsonFeature] = []
+
+    for row in range(height):
+        col = 0
+        while col < width:
+            while col < width and not bool(mask[row, col]):
+                col += 1
+            if col >= width:
+                break
+            run_start = col
+            while col < width and bool(mask[row, col]):
+                col += 1
+            run_end = col - 1
+
+            lon_min, _, lat_min, lat_max = _cell_bounds(run_start, row, width, height)
+            _, lon_max, _, _ = _cell_bounds(run_end, row, width, height)
+            relief_window = relief[row, run_start : (run_end + 1)]
+            mean_relief = float(np.mean(relief_window)) if relief_window.size > 0 else 0.5
+            ring = [
+                [round(lon_min, 5), round(lat_min, 5)],
+                [round(lon_max, 5), round(lat_min, 5)],
+                [round(lon_max, 5), round(lat_max, 5)],
+                [round(lon_min, 5), round(lat_max, 5)],
+                [round(lon_min, 5), round(lat_min, 5)],
+            ]
+            features.append(
+                GeoJsonFeature(
+                    geometry={"type": "Polygon", "coordinates": [ring]},
+                    properties={
+                        "derived": "surface_mask",
+                        "relief": round(mean_relief, 4),
+                        "oceanicAgeP99Myr": frame.plateLifecycleState.oceanicAgeP99Myr if frame.plateLifecycleState else None,
+                        "supercontinentPhase": frame.plateLifecycleState.supercontinentPhase if frame.plateLifecycleState else None,
+                    },
+                )
+            )
+
+    return features
+
+
+def _surface_coastline_features(mask: np.ndarray) -> list[GeoJsonFeature]:
+    height, width = mask.shape
+    features: list[GeoJsonFeature] = []
+
+    for row in range(height):
+        for col in range(width):
+            is_land = bool(mask[row, col])
+            if not is_land:
+                continue
+
+            right = bool(mask[row, (col + 1) % width]) if width > 1 else is_land
+            down = bool(mask[min(row + 1, height - 1), col]) if height > 1 else is_land
+
+            if not right:
+                _, lon_max, lat_min, lat_max = _cell_bounds(col, row, width, height)
+                features.append(
+                    GeoJsonFeature(
+                        geometry={
+                            "type": "LineString",
+                            "coordinates": [
+                                [round(lon_max, 5), round(lat_min, 5)],
+                                [round(lon_max, 5), round(lat_max, 5)],
+                            ],
+                        },
+                        properties={"derived": "coastline"},
+                    )
+                )
+
+            if not down:
+                lon_min, lon_max, lat_min, _ = _cell_bounds(col, row, width, height)
+                features.append(
+                    GeoJsonFeature(
+                        geometry={
+                            "type": "LineString",
+                            "coordinates": [
+                                [round(lon_min, 5), round(lat_min, 5)],
+                                [round(lon_max, 5), round(lat_min, 5)],
+                            ],
+                        },
+                        properties={"derived": "coastline"},
+                    )
+                )
+
+    return features
+
+
 def build_frame_render_payload(frame: TimelineFrame, *, source: str, nearest_time_ma: int) -> FrameRender:
     plate_kinematics = {item.plateId: item for item in frame.plateKinematics}
     boundary_kinematics = {item.segmentId: item for item in frame.boundaryKinematics}
+    boundary_states = {item.segmentId: item for item in frame.boundaryStates}
 
     landmass_features: list[GeoJsonFeature] = []
     for plate in frame.plateGeometries:
@@ -194,6 +321,9 @@ def build_frame_render_payload(frame: TimelineFrame, *, source: str, nearest_tim
             "convergenceCmYr": kin.convergenceCmYr if kin else None,
             "divergenceCmYr": kin.divergenceCmYr if kin else None,
             "continuityScore": kin.continuityScore if kin else None,
+            "supercontinentPhase": frame.plateLifecycleState.supercontinentPhase if frame.plateLifecycleState else None,
+            "supercontinentClusterFraction": frame.plateLifecycleState.supercontinentLargestClusterFraction if frame.plateLifecycleState else None,
+            "oceanicAgeP99Myr": frame.plateLifecycleState.oceanicAgeP99Myr if frame.plateLifecycleState else None,
         }
         landmass_features.append(
             GeoJsonFeature(
@@ -205,6 +335,7 @@ def build_frame_render_payload(frame: TimelineFrame, *, source: str, nearest_tim
     boundary_features: list[GeoJsonFeature] = []
     for boundary in frame.boundaryGeometries:
         kin = boundary_kinematics.get(boundary.segmentId)
+        state = boundary_states.get(boundary.segmentId)
         properties = {
             "segmentId": boundary.segmentId,
             "leftPlateId": boundary.leftPlateId,
@@ -218,6 +349,11 @@ def build_frame_render_payload(frame: TimelineFrame, *, source: str, nearest_tim
             "tangentialVelocityCmYr": kin.tangentialVelocityCmYr if kin else None,
             "strainRate": kin.strainRate if kin else None,
             "recommendedBoundaryType": kin.recommendedBoundaryType.value if kin else None,
+            "stateClass": state.stateClass.value if state else None,
+            "transitionCount": state.transitionCount if state else 0,
+            "subductionFlux": state.subductionFlux if state else 0.0,
+            "averageOceanicAgeMyr": state.averageOceanicAgeMyr if state else 0.0,
+            "motionMismatch": state.motionMismatch if state else False,
         }
         boundary_features.append(
             GeoJsonFeature(
@@ -228,6 +364,8 @@ def build_frame_render_payload(frame: TimelineFrame, *, source: str, nearest_tim
 
     overlay_features: list[GeoJsonFeature] = []
     for event in frame.eventOverlays:
+        phase_code = float(event.drivingMetrics.get("phaseCode", 1.0)) if event.drivingMetrics else 1.0
+        phase = "initiation" if phase_code <= 0.5 else ("active" if phase_code <= 1.5 else "decay")
         properties = {
             "eventId": event.eventId,
             "eventType": event.eventType.value,
@@ -238,6 +376,7 @@ def build_frame_render_payload(frame: TimelineFrame, *, source: str, nearest_tim
             "persistenceClass": event.persistenceClass,
             "sourceBoundaryIds": event.sourceBoundaryIds,
             "drivingMetrics": event.drivingMetrics,
+            "phase": phase,
         }
         overlay_features.append(
             GeoJsonFeature(
@@ -246,11 +385,29 @@ def build_frame_render_payload(frame: TimelineFrame, *, source: str, nearest_tim
             )
         )
 
+    surface_bundle = _build_landmask(frame)
+    if surface_bundle is not None:
+        surface_mask, relief = surface_bundle
+        landmass_features = _surface_landmass_features(surface_mask, relief, frame)
+        coastline_features = _surface_coastline_features(surface_mask)
+    else:
+        coastline_features = []
+
+    active_belts_features = [
+        feature
+        for feature in boundary_features
+        if str(feature.properties.get("stateClass")) in {"subduction", "collision", "suture", "rift", "ridge"}
+        or str(feature.properties.get("boundaryType")) in {"convergent", "divergent"}
+    ]
+
     return FrameRender(
         timeMa=frame.timeMa,
         landmassGeoJson=GeoJsonFeatureCollection(features=landmass_features),
         boundaryGeoJson=GeoJsonFeatureCollection(features=boundary_features),
         overlayGeoJson=GeoJsonFeatureCollection(features=overlay_features),
+        coastlineGeoJson=GeoJsonFeatureCollection(features=coastline_features),
+        activeBeltsGeoJson=GeoJsonFeatureCollection(features=active_belts_features),
+        reliefFieldRef=frame.previewHeightFieldRef or None,
         source="cache" if source == "cache" else "generated",
         nearestTimeMa=nearest_time_ma,
     )

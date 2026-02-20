@@ -24,8 +24,11 @@ from .models import (
     GenerateRequest,
     JobStatus,
     JobSummary,
+    PlausibilityReport,
+    ProjectConfig,
     ProjectCreateRequest,
     ProjectSummary,
+    SolverVersion,
     TimelineIndex,
     ValidationReport,
 )
@@ -72,8 +75,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             created_at=simulation.utc_now_iso(),
         )
 
+    @app.post("/v2/projects", response_model=ProjectSummary)
+    def create_project_v2(request: ProjectCreateRequest) -> ProjectSummary:
+        payload = request.config.model_dump(mode="json")
+        payload["solverVersion"] = SolverVersion.tectonic_state_v2.value
+        if payload.get("coreGridWidth") is None:
+            payload["coreGridWidth"] = 720 if payload.get("simulationMode") == "hybrid_rigor" else 512
+        if payload.get("coreGridHeight") is None:
+            payload["coreGridHeight"] = 360 if payload.get("simulationMode") == "hybrid_rigor" else 256
+        config = ProjectConfig.model_validate(payload)
+
+        project_id = str(uuid.uuid4())
+        project_store.initialize_project(project_id, config.model_dump(mode="json"))
+        return metadata.create_project(
+            project_id=project_id,
+            name=request.name,
+            config=config,
+            project_hash=stable_hash(config.model_dump(mode="json")),
+            created_at=simulation.utc_now_iso(),
+        )
+
     @app.get("/v1/projects/{project_id}", response_model=ProjectSummary)
     def get_project(project_id: str) -> ProjectSummary:
+        project = metadata.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        return project
+
+    @app.get("/v2/projects/{project_id}", response_model=ProjectSummary)
+    def get_project_v2(project_id: str) -> ProjectSummary:
         project = metadata.get_project(project_id)
         if project is None:
             raise HTTPException(status_code=404, detail="project not found")
@@ -93,6 +123,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 simulation_mode_override=request.simulationModeOverride.value if request.simulationModeOverride else None,
                 rigor_profile_override=request.rigorProfileOverride.value if request.rigorProfileOverride else None,
                 runtime_override=request.targetRuntimeMinutesOverride,
+                quality_mode=request.qualityMode,
+                source_quick_run_id=request.sourceQuickRunId,
+                job_callback=lambda progress, message: jobs.set_state(job_id, progress=progress, message=message),
+                is_canceled=lambda: jobs.is_canceled(job_id),
+            )
+            if jobs.is_canceled(job_id):
+                jobs.set_state(job_id, status=JobStatus.canceled, message="generation canceled")
+                return
+            jobs.set_state(job_id, message=f"run {run_id} cached")
+
+        jobs.submit(job.jobId, run)
+        latest = jobs.get_job(job.jobId)
+        if latest is None:
+            raise HTTPException(status_code=500, detail="job not available")
+        return latest
+
+    @app.post("/v2/projects/{project_id}/generate", response_model=JobSummary)
+    def generate_project_v2(project_id: str, request: GenerateRequest) -> JobSummary:
+        project = metadata.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+
+        job = jobs.create_job(project_id, "generate", message=f"queued v2 run {request.runLabel}")
+
+        def run(job_id: str) -> None:
+            run_id = simulation.generate_project(
+                project_id,
+                simulation_mode_override=request.simulationModeOverride.value if request.simulationModeOverride else None,
+                rigor_profile_override=request.rigorProfileOverride.value if request.rigorProfileOverride else None,
+                runtime_override=request.targetRuntimeMinutesOverride,
+                quality_mode=request.qualityMode,
+                source_quick_run_id=request.sourceQuickRunId,
                 job_callback=lambda progress, message: jobs.set_state(job_id, progress=progress, message=message),
                 is_canceled=lambda: jobs.is_canceled(job_id),
             )
@@ -114,8 +176,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="project not found")
         return simulation.get_timeline_index(project)
 
+    @app.get("/v2/projects/{project_id}/timeline-index", response_model=TimelineIndex)
+    def get_timeline_index_v2(project_id: str) -> TimelineIndex:
+        project = metadata.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        return simulation.get_timeline_index(project)
+
     @app.get("/v1/projects/{project_id}/frames", response_model=FrameRangeResponse)
     def get_frames_range(
+        project_id: str,
+        time_from: int = Query(...),
+        time_to: int = Query(...),
+        step: int = Query(1, ge=1),
+        detail: str = Query("render"),
+        exact: bool = Query(False),
+    ) -> FrameRangeResponse:
+        project = metadata.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        start = project.config.startTimeMa
+        end = project.config.endTimeMa
+        for value in (time_from, time_to):
+            if value < end or value > start:
+                raise HTTPException(status_code=400, detail="time out of project range")
+        try:
+            return simulation.get_frame_range(
+                project,
+                time_from=time_from,
+                time_to=time_to,
+                step=step,
+                detail=detail,
+                exact=exact,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/v2/projects/{project_id}/frames", response_model=FrameRangeResponse)
+    def get_frames_range_v2(
         project_id: str,
         time_from: int = Query(...),
         time_to: int = Query(...),
@@ -152,6 +250,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="time out of project range")
         return simulation.get_or_create_frame(project, time_ma)
 
+    @app.get("/v2/projects/{project_id}/frames/{time_ma}", response_model=FrameSummary)
+    def get_frame_v2(project_id: str, time_ma: int) -> FrameSummary:
+        project = metadata.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        if time_ma < project.config.endTimeMa or time_ma > project.config.startTimeMa:
+            raise HTTPException(status_code=400, detail="time out of project range")
+        return simulation.get_or_create_frame(project, time_ma)
+
     @app.get("/v1/projects/{project_id}/frames/{time_ma}/diagnostics", response_model=FrameDiagnostics)
     def get_frame_diagnostics(project_id: str, time_ma: int) -> FrameDiagnostics:
         project = metadata.get_project(project_id)
@@ -161,6 +268,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return simulation.get_frame_diagnostics(project_id, time_ma)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/v2/projects/{project_id}/frames/{time_ma}/diagnostics", response_model=FrameDiagnostics)
+    def get_frame_diagnostics_v2(project_id: str, time_ma: int) -> FrameDiagnostics:
+        project = metadata.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        try:
+            return simulation.get_frame_diagnostics(project_id, time_ma)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/v2/projects/{project_id}/plausibility", response_model=PlausibilityReport)
+    def get_plausibility_v2(project_id: str) -> PlausibilityReport:
+        project = metadata.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        return simulation.get_plausibility_report(project_id)
 
     @app.get("/v1/projects/{project_id}/coverage", response_model=CoverageReport)
     def get_coverage(project_id: str) -> CoverageReport:

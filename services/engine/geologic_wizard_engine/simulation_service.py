@@ -21,10 +21,14 @@ from .models import (
     FrameRangeResponse,
     FrameRender,
     FrameSummary,
+    PlausibilityCheck,
+    PlausibilityReport,
     ProjectConfig,
     ProjectSummary,
     ProvenanceRecord,
+    QualityMode,
     RefineResult,
+    SolverVersion,
     TimelineIndex,
     TimelineIndexHashEntry,
     TimelineFrame,
@@ -41,14 +45,21 @@ from .modules.tectonic_backends import (
     derive_seed_bundle,
     frame_coverage_ratio,
 )
+from .modules.tectonics_v2 import build_backend_v2
 from .modules.terrain_synthesis import synthesize_preview_height, synthesize_refined_region
-from .modules.validation import validate_frame, validate_frame_pair
+from .modules.validation import (
+    build_plausibility_checks_from_frame,
+    summarize_check_severity,
+    validate_frame,
+    validate_frame_pair,
+)
 from .project_store import ProjectStore
 from .settings import Settings
 from .utils import sha256_bytes, stable_hash
 
 ENGINE_VERSION = "0.2.0"
 MODEL_VERSION = "tectonic-hybrid-backends-v1"
+MODEL_VERSION_V2 = "tectonic-state-v2"
 
 
 @dataclass
@@ -59,8 +70,12 @@ class RunContext:
     seed_bundle: Any
     pygplates_status: str
     pygplates_available: bool
+    quality_mode: QualityMode = QualityMode.quick
+    source_quick_run_id: str | None = None
+    macro_digest: str = ""
     coverage_by_time: dict[int, float] = field(default_factory=dict)
     diagnostics_by_time: dict[int, FrameDiagnostics] = field(default_factory=dict)
+    plausibility_by_time: dict[int, list[PlausibilityCheck]] = field(default_factory=dict)
     kinematic_digest_by_time: dict[int, str] = field(default_factory=dict)
     uncertainty_digest_by_time: dict[int, str] = field(default_factory=dict)
     timeline_index: TimelineIndex | None = None
@@ -115,6 +130,12 @@ class SimulationService:
         config = ProjectConfig.model_validate(manifest.get("runConfig", {}))
         seed_bundle = manifest.get("seedBundle", derive_seed_bundle(config.seed).model_dump(mode="json"))
 
+        quality_value = manifest.get("qualityMode", "quick")
+        try:
+            quality_mode = QualityMode(str(quality_value))
+        except Exception:
+            quality_mode = QualityMode.quick
+
         context = RunContext(
             run_id=run_id,
             project_id=project_id,
@@ -122,6 +143,9 @@ class SimulationService:
             seed_bundle=seed_bundle,
             pygplates_status=manifest.get("pygplatesStatus", "unknown"),
             pygplates_available=bool(manifest.get("pygplatesAvailable", False)),
+            quality_mode=quality_mode,
+            source_quick_run_id=manifest.get("sourceQuickRunId"),
+            macro_digest=str(manifest.get("macroDigest", "")),
             coverage_by_time={
                 int(item["timeMa"]): float(item["coverageRatio"]) for item in manifest.get("coverageByTime", [])
             },
@@ -266,6 +290,308 @@ class SimulationService:
             index.times.append(time_ma)
             index.times.sort(reverse=True)
 
+    def _build_backend_for_config(self, run_config: ProjectConfig) -> Any:
+        if run_config.solverVersion == SolverVersion.tectonic_state_v2:
+            return build_backend_v2()
+        return build_backend(run_config.simulationMode)
+
+    def _solver_model_version(self, run_config: ProjectConfig) -> str:
+        if run_config.solverVersion == SolverVersion.tectonic_state_v2:
+            return MODEL_VERSION_V2
+        return MODEL_VERSION
+
+    def _coverage_ratio_for_result(self, result: Any) -> float:
+        if result.frame.plateLifecycleState is not None:
+            lifecycle_gap = float(result.frame.plateLifecycleState.netAreaBalanceError)
+            lifecycle_coverage = max(0.0, min(1.0, 1.0 - lifecycle_gap))
+            return round((result.coverage_ratio + lifecycle_coverage) * 0.5, 4)
+        return round((result.coverage_ratio + frame_coverage_ratio(result.frame)) * 0.5, 4)
+
+    def _persist_auxiliary_fields(self, project_id: str, run_id: str, time_ma: int, backend_result: Any) -> None:
+        if not hasattr(backend_result, "oceanic_age_field"):
+            return
+
+        oceanic_age_path = self.project_store.oceanic_age_array_path(project_id, run_id, time_ma)
+        crust_type_path = self.project_store.crust_type_array_path(project_id, run_id, time_ma)
+        crust_thickness_path = self.project_store.crust_thickness_array_path(project_id, run_id, time_ma)
+        tectonic_potential_path = self.project_store.tectonic_potential_array_path(project_id, run_id, time_ma)
+
+        self.project_store.write_array(oceanic_age_path, backend_result.oceanic_age_field)
+        self.project_store.write_array(crust_type_path, backend_result.crust_type_field)
+        self.project_store.write_array(crust_thickness_path, backend_result.crust_thickness_field)
+        self.project_store.write_array(tectonic_potential_path, backend_result.tectonic_potential_field)
+
+        backend_result.frame.oceanicAgeFieldRef = str(oceanic_age_path)
+        backend_result.frame.crustTypeFieldRef = str(crust_type_path)
+        backend_result.frame.crustThicknessFieldRef = str(crust_thickness_path)
+        backend_result.frame.tectonicPotentialFieldRef = str(tectonic_potential_path)
+
+    def _extract_macro_snapshot(self, frame: TimelineFrame) -> dict[str, Any]:
+        payload = frame.model_dump(mode="json")
+        payload["previewHeightFieldRef"] = ""
+        payload["strainFieldRef"] = None
+        payload["oceanicAgeFieldRef"] = None
+        payload["crustTypeFieldRef"] = None
+        payload["crustThicknessFieldRef"] = None
+        payload["tectonicPotentialFieldRef"] = None
+        return payload
+
+    def _write_macro_history(self, project_id: str, run_id: str, snapshots: list[dict[str, Any]]) -> str:
+        digest = stable_hash(
+            {
+                "times": [int(item["timeMa"]) for item in snapshots],
+                "frames": snapshots,
+            }
+        )
+        payload = {
+            "projectId": project_id,
+            "runId": run_id,
+            "times": [int(item["timeMa"]) for item in snapshots],
+            "frames": snapshots,
+            "macroDigest": digest,
+        }
+        self.project_store.write_json(self.project_store.macro_history_path(project_id, run_id), payload)
+        return digest
+
+    def _read_macro_history(self, project_id: str, run_id: str) -> tuple[str, list[dict[str, Any]]] | None:
+        path = self.project_store.macro_history_path(project_id, run_id)
+        if not path.exists():
+            return None
+        data = self.project_store.read_json(path)
+        frames = data.get("frames")
+        if not isinstance(frames, list):
+            return None
+        digest = str(
+            data.get("macroDigest")
+            or stable_hash(
+                {
+                    "times": [int(item.get("timeMa", 0)) for item in frames if isinstance(item, dict)],
+                    "frames": frames,
+                }
+            )
+        )
+        return digest, frames
+
+    def _list_project_run_manifests(self, project_id: str) -> list[dict[str, Any]]:
+        runs_root = self.project_store.project_dir(project_id) / "runs"
+        manifests: list[dict[str, Any]] = []
+        if not runs_root.exists():
+            return manifests
+        for run_dir in runs_root.iterdir():
+            manifest_path = run_dir / "manifest.json"
+            if not manifest_path.exists():
+                continue
+            try:
+                manifest = self.project_store.read_json(manifest_path)
+                manifest["runId"] = str(manifest.get("runId") or run_dir.name)
+                manifests.append(manifest)
+            except Exception:
+                continue
+        manifests.sort(key=lambda item: str(item.get("generatedAt", "")), reverse=True)
+        return manifests
+
+    def _resolve_source_quick_run_id(self, project_id: str, explicit_run_id: str | None) -> str | None:
+        if explicit_run_id:
+            return explicit_run_id
+        for manifest in self._list_project_run_manifests(project_id):
+            if str(manifest.get("qualityMode", "quick")) == QualityMode.quick.value:
+                return str(manifest["runId"])
+        return None
+
+    def _synthesize_surface_from_macro_frame(
+        self,
+        frame: TimelineFrame,
+        *,
+        run_config: ProjectConfig,
+        seed: int,
+        quality_mode: QualityMode,
+    ) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+        base_width = run_config.coreGridWidth or (
+            720 if run_config.simulationMode.value == "hybrid_rigor" else self.settings.default_preview_width
+        )
+        base_height = run_config.coreGridHeight or (
+            360 if run_config.simulationMode.value == "hybrid_rigor" else self.settings.default_preview_height
+        )
+        preview_width = base_width if quality_mode == QualityMode.quick else min(2048, base_width * 2)
+        preview_height = base_height if quality_mode == QualityMode.quick else min(1024, base_height * 2)
+        preview, fields = synthesize_preview_height(
+            time_ma=frame.timeMa,
+            seed=seed,
+            plates=frame.plateGeometries,
+            events=frame.eventOverlays,
+            boundary_kinematics=frame.boundaryKinematics,
+            uncertainty=frame.uncertaintySummary,
+            width=preview_width,
+            height=preview_height,
+        )
+
+        # Full mode adds additional deterministic erosion/smoothing passes for richer terrain realization.
+        if quality_mode == QualityMode.full:
+            full_passes = 18 if run_config.simulationMode.value == "fast_plausible" else 28
+            if run_config.rigorProfile.value == "research":
+                full_passes += 8
+            for _ in range(full_passes):
+                neighborhood = (
+                    preview
+                    + np.roll(preview, 1, axis=0)
+                    + np.roll(preview, -1, axis=0)
+                    + np.roll(preview, 1, axis=1)
+                    + np.roll(preview, -1, axis=1)
+                ) / 5.0
+                relief = np.clip(preview - neighborhood, -0.15, 0.15)
+                preview = np.clip(neighborhood + relief * 0.55, 0.0, 1.0)
+
+                if run_config.rigorProfile.value == "research":
+                    grad_y, grad_x = np.gradient(preview)
+                    slope = np.sqrt((grad_x * grad_x) + (grad_y * grad_y))
+                    erosion = np.clip(slope * 0.11, 0.0, 0.05)
+                    uplift_bias = np.clip(fields["uplift"] * 0.08, 0.0, 0.06)
+                    preview = np.clip(preview + uplift_bias - erosion, 0.0, 1.0)
+
+            basin = np.clip(fields["subsidence"] * 0.08, 0.0, 0.08)
+            preview = np.clip(preview - basin + np.clip(fields["volcanic"] * 0.05, 0.0, 0.04), 0.0, 1.0)
+
+        strain_height = max(128, min(512, preview_height // 2))
+        strain_width = max(256, min(1024, preview_width // 2))
+        strain = np.zeros((strain_height, strain_width), dtype=np.float32)
+        for boundary in frame.boundaryGeometries:
+            coords = boundary.geometry.get("coordinates", [])
+            if len(coords) < 2:
+                continue
+            cx = (float(coords[0][0]) + float(coords[1][0])) * 0.5
+            cy = (float(coords[0][1]) + float(coords[1][1])) * 0.5
+            x = int(((cx + 180.0) / 360.0) * (strain.shape[1] - 1))
+            y = int(((cy + 90.0) / 180.0) * (strain.shape[0] - 1))
+            x = max(0, min(strain.shape[1] - 1, x))
+            y = max(0, min(strain.shape[0] - 1, y))
+            strain[y, x] = min(1.0, strain[y, x] + 0.35)
+
+        for _ in range(4):
+            strain = (
+                strain
+                + np.roll(strain, 1, axis=0)
+                + np.roll(strain, -1, axis=0)
+                + np.roll(strain, 1, axis=1)
+                + np.roll(strain, -1, axis=1)
+            ) / 5.0
+
+        return preview.astype(np.float32), strain.astype(np.float32), fields
+
+    def _materialize_full_run_from_macro(
+        self,
+        *,
+        project_id: str,
+        run_id: str,
+        run_config: ProjectConfig,
+        quality_mode: QualityMode,
+        macro_snapshots: list[dict[str, Any]],
+        context: RunContext,
+        timeline_index: TimelineIndex,
+        manifest: dict[str, Any],
+        job_callback: Any,
+        is_canceled: Any,
+    ) -> None:
+        total = max(1, len(macro_snapshots))
+        for idx, snapshot in enumerate(macro_snapshots, start=1):
+            if is_canceled():
+                break
+
+            frame = TimelineFrame.model_validate(snapshot)
+            preview, strain, fields = self._synthesize_surface_from_macro_frame(
+                frame,
+                run_config=run_config,
+                seed=run_config.seed,
+                quality_mode=quality_mode,
+            )
+
+            preview_path = self.project_store.preview_array_path(project_id, run_id, frame.timeMa)
+            strain_path = self.project_store.strain_array_path(project_id, run_id, frame.timeMa)
+            self.project_store.write_array(preview_path, preview)
+            self.project_store.write_array(strain_path, strain)
+            frame.previewHeightFieldRef = str(preview_path)
+            frame.strainFieldRef = str(strain_path)
+
+            # Surface-only full pass derives deterministic fields from tectonic potential components.
+            oceanic_age = np.clip((1.0 - fields["crust_age"]) * 320.0, 0.0, 500.0).astype(np.float32)
+            crust_type = (preview >= 0.53).astype(np.uint8)
+            crust_thickness = np.where(crust_type > 0, 34.0 + fields["uplift"] * 18.0, 6.5 + oceanic_age * 0.012).astype(np.float32)
+            tectonic_potential = np.clip(fields["uplift"] + fields["volcanic"] - fields["subsidence"], 0.0, 1.0).astype(np.float32)
+
+            oceanic_age_path = self.project_store.oceanic_age_array_path(project_id, run_id, frame.timeMa)
+            crust_type_path = self.project_store.crust_type_array_path(project_id, run_id, frame.timeMa)
+            crust_thickness_path = self.project_store.crust_thickness_array_path(project_id, run_id, frame.timeMa)
+            tectonic_potential_path = self.project_store.tectonic_potential_array_path(project_id, run_id, frame.timeMa)
+            self.project_store.write_array(oceanic_age_path, oceanic_age)
+            self.project_store.write_array(crust_type_path, crust_type)
+            self.project_store.write_array(crust_thickness_path, crust_thickness)
+            self.project_store.write_array(tectonic_potential_path, tectonic_potential)
+
+            frame.oceanicAgeFieldRef = str(oceanic_age_path)
+            frame.crustTypeFieldRef = str(crust_type_path)
+            frame.crustThicknessFieldRef = str(crust_thickness_path)
+            frame.tectonicPotentialFieldRef = str(tectonic_potential_path)
+
+            diagnostics = FrameDiagnostics(
+                projectId=project_id,
+                timeMa=frame.timeMa,
+                continuityViolations=[
+                    f"plate_{item.plateId}_continuity_low"
+                    for item in frame.plateKinematics
+                    if item.continuityScore < 0.2
+                ],
+                boundaryConsistencyIssues=[
+                    f"{item.segmentId}_motion_mismatch"
+                    for item in frame.boundaryStates
+                    if item.motionMismatch
+                ],
+                coverageGapRatio=frame.uncertaintySummary.coverage,
+                warnings=[],
+                pygplatesStatus=context.pygplates_status,
+            )
+
+            full_hash, render_hash = self._persist_frame_bundle(
+                project_id=project_id,
+                run_id=run_id,
+                frame=frame,
+                diagnostics=diagnostics,
+                source="generated",
+            )
+            self._record_timeline_hash(
+                timeline_index,
+                time_ma=frame.timeMa,
+                full_hash=full_hash,
+                render_hash=render_hash,
+            )
+
+            coverage_ratio = round(max(0.0, min(1.0, 1.0 - frame.uncertaintySummary.coverage)), 4)
+            context.coverage_by_time[frame.timeMa] = coverage_ratio
+            context.diagnostics_by_time[frame.timeMa] = diagnostics
+            context.kinematic_digest_by_time[frame.timeMa] = stable_hash([item.model_dump(mode="json") for item in frame.plateKinematics])
+            context.uncertainty_digest_by_time[frame.timeMa] = stable_hash(frame.uncertaintySummary.model_dump(mode="json"))
+            context.plausibility_by_time[frame.timeMa] = build_plausibility_checks_from_frame(frame)
+
+            manifest["frames"].append(
+                {
+                    "timeMa": frame.timeMa,
+                    "framePath": str(self.project_store.frame_path(project_id, run_id, frame.timeMa)),
+                    "renderFramePath": str(self.project_store.render_frame_path(project_id, run_id, frame.timeMa)),
+                    "diagnosticsPath": str(self.project_store.run_diagnostics_path(project_id, run_id, frame.timeMa)),
+                    "fullHash": full_hash,
+                    "renderHash": render_hash,
+                }
+            )
+            manifest["coverageByTime"].append(
+                {
+                    "timeMa": frame.timeMa,
+                    "coverageRatio": coverage_ratio,
+                    "kinematicDigest": context.kinematic_digest_by_time[frame.timeMa],
+                    "uncertaintyDigest": context.uncertainty_digest_by_time[frame.timeMa],
+                    "checkCount": len(context.plausibility_by_time[frame.timeMa]),
+                }
+            )
+
+            job_callback(idx / total, f"realizing {quality_mode.value} surface {frame.timeMa} Ma")
+
     def generate_project(
         self,
         project_id: str,
@@ -273,6 +599,8 @@ class SimulationService:
         simulation_mode_override: str | None,
         rigor_profile_override: str | None,
         runtime_override: int | None,
+        quality_mode: QualityMode = QualityMode.quick,
+        source_quick_run_id: str | None = None,
         job_callback: Any,
         is_canceled: Any,
     ) -> str:
@@ -288,14 +616,14 @@ class SimulationService:
         )
 
         run_id = str(uuid.uuid4())
-        self.metadata.set_project_run(project_id, run_id, self.utc_now_iso())
+        self.metadata.set_project_run(project_id, run_id, self.utc_now_iso(), quality_mode.value)
 
         steps = self._time_steps(run_config.startTimeMa, run_config.endTimeMa, run_config.timeIncrementMyr)
         total = len(steps)
         edits = self.metadata.list_edits(project_id)
 
         seed_bundle = derive_seed_bundle(run_config.seed)
-        backend = build_backend(run_config.simulationMode)
+        backend = self._build_backend_for_config(run_config)
         pygplates_cache = self.pygplates_adapter.build_cache(self.project_store.project_dir(project_id) / "tectonics")
         state = backend.initialize(run_config, seed_bundle, pygplates_cache)
 
@@ -306,6 +634,8 @@ class SimulationService:
             seed_bundle=seed_bundle,
             pygplates_status=pygplates_cache.status,
             pygplates_available=pygplates_cache.available,
+            quality_mode=quality_mode,
+            source_quick_run_id=source_quick_run_id,
         )
 
         manifest = {
@@ -313,87 +643,130 @@ class SimulationService:
             "generatedAt": self.utc_now_iso(),
             "keyframeIntervalMyr": self.settings.keyframe_interval_myr,
             "runConfig": run_config.model_dump(mode="json"),
+            "solverVersion": run_config.solverVersion.value,
             "seedBundle": seed_bundle.model_dump(mode="json"),
             "pygplatesStatus": pygplates_cache.status,
             "pygplatesAvailable": pygplates_cache.available,
+            "qualityMode": quality_mode.value,
+            "sourceQuickRunId": source_quick_run_id,
             "frames": [],
             "coverageByTime": [],
         }
         timeline_index = self._empty_timeline_index(project_id, run_id, run_config)
+        macro_snapshots: list[dict[str, Any]] = []
 
-        for idx, time_ma in enumerate(steps, start=1):
-            if is_canceled():
-                break
+        if quality_mode == QualityMode.full and run_config.solverVersion == SolverVersion.tectonic_state_v2:
+            resolved_quick_run_id = self._resolve_source_quick_run_id(project_id, source_quick_run_id)
+            if resolved_quick_run_id is None:
+                raise ValueError("full run requires an existing quick run for macro-history reuse")
+            macro_data = self._read_macro_history(project_id, resolved_quick_run_id)
+            if macro_data is None:
+                raise ValueError(f"macro history missing for quick run {resolved_quick_run_id}")
+            macro_digest, macro_snapshots = macro_data
+            context.source_quick_run_id = resolved_quick_run_id
+            context.macro_digest = macro_digest
+            manifest["sourceQuickRunId"] = resolved_quick_run_id
+            manifest["macroDigest"] = macro_digest
 
-            backend_result = backend.build_frame(
-                project_id=project_id,
-                config=run_config,
-                state=state,
-                time_ma=time_ma,
-                edits=edits,
-            )
-
-            preview, _fields = synthesize_preview_height(
-                time_ma=time_ma,
-                seed=run_config.seed,
-                plates=backend_result.frame.plateGeometries,
-                events=backend_result.frame.eventOverlays,
-                boundary_kinematics=backend_result.frame.boundaryKinematics,
-                uncertainty=backend_result.frame.uncertaintySummary,
-                width=self.settings.default_preview_width,
-                height=self.settings.default_preview_height,
-            )
-
-            preview_path = self.project_store.preview_array_path(project_id, time_ma)
-            strain_path = self.project_store.strain_array_path(project_id, time_ma)
-            self.project_store.write_array(preview_path, preview)
-            self.project_store.write_array(strain_path, backend_result.strain_field)
-
-            backend_result.frame.previewHeightFieldRef = str(preview_path)
-            backend_result.frame.strainFieldRef = str(strain_path)
-            full_hash, render_hash = self._persist_frame_bundle(
+            self._materialize_full_run_from_macro(
                 project_id=project_id,
                 run_id=run_id,
-                frame=backend_result.frame,
-                diagnostics=backend_result.diagnostics,
-                source="generated",
+                run_config=run_config,
+                quality_mode=quality_mode,
+                macro_snapshots=macro_snapshots,
+                context=context,
+                timeline_index=timeline_index,
+                manifest=manifest,
+                job_callback=job_callback,
+                is_canceled=is_canceled,
             )
-            self._record_timeline_hash(
-                timeline_index,
-                time_ma=time_ma,
-                full_hash=full_hash,
-                render_hash=render_hash,
-            )
-            manifest["frames"].append(
-                {
-                    "timeMa": time_ma,
-                    "framePath": str(self.project_store.frame_path(project_id, run_id, time_ma)),
-                    "renderFramePath": str(self.project_store.render_frame_path(project_id, run_id, time_ma)),
-                    "diagnosticsPath": str(self.project_store.run_diagnostics_path(project_id, run_id, time_ma)),
-                    "fullHash": full_hash,
-                    "renderHash": render_hash,
-                }
-            )
+            self._write_macro_history(project_id, run_id, macro_snapshots)
+        else:
+            for idx, time_ma in enumerate(steps, start=1):
+                if is_canceled():
+                    break
 
-            coverage_ratio = round((backend_result.coverage_ratio + frame_coverage_ratio(backend_result.frame)) * 0.5, 4)
-            context.coverage_by_time[time_ma] = coverage_ratio
-            context.diagnostics_by_time[time_ma] = backend_result.diagnostics
-            context.kinematic_digest_by_time[time_ma] = backend_result.kinematic_digest
-            context.uncertainty_digest_by_time[time_ma] = backend_result.uncertainty_digest
+                backend_result = backend.build_frame(
+                    project_id=project_id,
+                    config=run_config,
+                    state=state,
+                    time_ma=time_ma,
+                    edits=edits,
+                )
 
-            manifest["coverageByTime"].append(
-                {
-                    "timeMa": time_ma,
-                    "coverageRatio": coverage_ratio,
-                    "kinematicDigest": backend_result.kinematic_digest,
-                    "uncertaintyDigest": backend_result.uncertainty_digest,
-                }
-            )
+                if hasattr(backend_result, "preview_height_field"):
+                    preview = backend_result.preview_height_field
+                else:
+                    preview, _fields = synthesize_preview_height(
+                        time_ma=time_ma,
+                        seed=run_config.seed,
+                        plates=backend_result.frame.plateGeometries,
+                        events=backend_result.frame.eventOverlays,
+                        boundary_kinematics=backend_result.frame.boundaryKinematics,
+                        uncertainty=backend_result.frame.uncertaintySummary,
+                        width=self.settings.default_preview_width,
+                        height=self.settings.default_preview_height,
+                    )
 
-            job_callback(idx / total, f"simulating {time_ma} Ma ({run_config.simulationMode.value})")
+                preview_path = self.project_store.preview_array_path(project_id, run_id, time_ma)
+                strain_path = self.project_store.strain_array_path(project_id, run_id, time_ma)
+                self.project_store.write_array(preview_path, preview)
+                self.project_store.write_array(strain_path, backend_result.strain_field)
 
-            if idx < total:
-                backend.advance(state, run_config, time_ma, run_config.timeIncrementMyr, edits)
+                backend_result.frame.previewHeightFieldRef = str(preview_path)
+                backend_result.frame.strainFieldRef = str(strain_path)
+                self._persist_auxiliary_fields(project_id, run_id, time_ma, backend_result)
+                full_hash, render_hash = self._persist_frame_bundle(
+                    project_id=project_id,
+                    run_id=run_id,
+                    frame=backend_result.frame,
+                    diagnostics=backend_result.diagnostics,
+                    source="generated",
+                )
+                self._record_timeline_hash(
+                    timeline_index,
+                    time_ma=time_ma,
+                    full_hash=full_hash,
+                    render_hash=render_hash,
+                )
+                manifest["frames"].append(
+                    {
+                        "timeMa": time_ma,
+                        "framePath": str(self.project_store.frame_path(project_id, run_id, time_ma)),
+                        "renderFramePath": str(self.project_store.render_frame_path(project_id, run_id, time_ma)),
+                        "diagnosticsPath": str(self.project_store.run_diagnostics_path(project_id, run_id, time_ma)),
+                        "fullHash": full_hash,
+                        "renderHash": render_hash,
+                    }
+                )
+
+                coverage_ratio = self._coverage_ratio_for_result(backend_result)
+                context.coverage_by_time[time_ma] = coverage_ratio
+                context.diagnostics_by_time[time_ma] = backend_result.diagnostics
+                context.plausibility_by_time[time_ma] = list(getattr(backend_result, "plausibility_checks", []))
+                context.kinematic_digest_by_time[time_ma] = backend_result.kinematic_digest
+                context.uncertainty_digest_by_time[time_ma] = backend_result.uncertainty_digest
+
+                manifest["coverageByTime"].append(
+                    {
+                        "timeMa": time_ma,
+                        "coverageRatio": coverage_ratio,
+                        "kinematicDigest": backend_result.kinematic_digest,
+                        "uncertaintyDigest": backend_result.uncertainty_digest,
+                        "checkCount": len(getattr(backend_result, "plausibility_checks", [])),
+                    }
+                )
+
+                macro_snapshots.append(self._extract_macro_snapshot(backend_result.frame))
+
+                job_callback(idx / total, f"simulating {time_ma} Ma ({run_config.simulationMode.value})")
+
+                if idx < total:
+                    backend.advance(state, run_config, time_ma, run_config.timeIncrementMyr, edits)
+
+            macro_digest = self._write_macro_history(project_id, run_id, macro_snapshots)
+            manifest["macroDigest"] = macro_digest
+            context.macro_digest = macro_digest
 
         fallback_times = aggregate_fallback_times(steps, context.coverage_by_time)
         manifest["fallbackTimesMa"] = fallback_times
@@ -412,7 +785,7 @@ class SimulationService:
     def _replay_frame(self, project: ProjectSummary, run_config: ProjectConfig, run_id: str, time_ma: int) -> Any:
         edits = self.metadata.list_edits(project.projectId)
         seed_bundle = derive_seed_bundle(run_config.seed)
-        backend = build_backend(run_config.simulationMode)
+        backend = self._build_backend_for_config(run_config)
         pygplates_cache = self.pygplates_adapter.build_cache(self.project_store.project_dir(project.projectId) / "tectonics")
         state = backend.initialize(run_config, seed_bundle, pygplates_cache)
 
@@ -424,22 +797,26 @@ class SimulationService:
                 time_ma=current_time,
                 edits=edits,
             )
-            preview, _fields = synthesize_preview_height(
-                time_ma=current_time,
-                seed=run_config.seed,
-                plates=backend_result.frame.plateGeometries,
-                events=backend_result.frame.eventOverlays,
-                boundary_kinematics=backend_result.frame.boundaryKinematics,
-                uncertainty=backend_result.frame.uncertaintySummary,
-                width=self.settings.default_preview_width,
-                height=self.settings.default_preview_height,
-            )
-            preview_path = self.project_store.preview_array_path(project.projectId, current_time)
-            strain_path = self.project_store.strain_array_path(project.projectId, current_time)
+            if hasattr(backend_result, "preview_height_field"):
+                preview = backend_result.preview_height_field
+            else:
+                preview, _fields = synthesize_preview_height(
+                    time_ma=current_time,
+                    seed=run_config.seed,
+                    plates=backend_result.frame.plateGeometries,
+                    events=backend_result.frame.eventOverlays,
+                    boundary_kinematics=backend_result.frame.boundaryKinematics,
+                    uncertainty=backend_result.frame.uncertaintySummary,
+                    width=self.settings.default_preview_width,
+                    height=self.settings.default_preview_height,
+                )
+            preview_path = self.project_store.preview_array_path(project.projectId, run_id, current_time)
+            strain_path = self.project_store.strain_array_path(project.projectId, run_id, current_time)
             self.project_store.write_array(preview_path, preview)
             self.project_store.write_array(strain_path, backend_result.strain_field)
             backend_result.frame.previewHeightFieldRef = str(preview_path)
             backend_result.frame.strainFieldRef = str(strain_path)
+            self._persist_auxiliary_fields(project.projectId, run_id, current_time, backend_result)
 
             if current_time == time_ma:
                 self._persist_frame_bundle(
@@ -535,8 +912,9 @@ class SimulationService:
 
             if context is not None:
                 context.diagnostics_by_time[time_ma] = replay.diagnostics
-                coverage_ratio = round((replay.coverage_ratio + frame_coverage_ratio(replay.frame)) * 0.5, 4)
+                coverage_ratio = self._coverage_ratio_for_result(replay)
                 context.coverage_by_time[time_ma] = coverage_ratio
+                context.plausibility_by_time[time_ma] = list(getattr(replay, "plausibility_checks", []))
                 context.kinematic_digest_by_time[time_ma] = replay.kinematic_digest
                 context.uncertainty_digest_by_time[time_ma] = replay.uncertainty_digest
 
@@ -697,8 +1075,31 @@ class SimulationService:
             return diagnostics
 
         frame_summary = self.get_or_create_frame(project, time_ma)
-        continuity = collect_continuity_violations(frame_summary.frame)
-        semantic = collect_boundary_semantic_issues(frame_summary.frame)
+        if frame_summary.frame.boundaryStates:
+            continuity = [
+                f"plate_{item.plateId}_continuity_low"
+                for item in frame_summary.frame.plateKinematics
+                if item.continuityScore < 0.2
+            ]
+            semantic = [
+                f"{item.segmentId}_motion_mismatch"
+                for item in frame_summary.frame.boundaryStates
+                if item.motionMismatch
+            ]
+            checks = build_plausibility_checks_from_frame(frame_summary.frame)
+            metrics = {
+                "boundary.motion_mismatch_count": float(len(semantic)),
+                "lifecycle.net_area_balance_error": float(
+                    frame_summary.frame.plateLifecycleState.netAreaBalanceError
+                    if frame_summary.frame.plateLifecycleState
+                    else 0.0
+                ),
+            }
+        else:
+            continuity = collect_continuity_violations(frame_summary.frame)
+            semantic = collect_boundary_semantic_issues(frame_summary.frame)
+            checks = []
+            metrics = {}
         diagnostics = FrameDiagnostics(
             projectId=project_id,
             timeMa=time_ma,
@@ -707,6 +1108,8 @@ class SimulationService:
             coverageGapRatio=frame_summary.frame.uncertaintySummary.coverage,
             warnings=[],
             pygplatesStatus=context.pygplates_status if context else "unknown",
+            metrics=metrics,
+            checkIds=[item.checkId for item in checks],
         )
         self.project_store.write_run_diagnostics(project_id, run_id, time_ma, diagnostics.model_dump(mode="json"))
         if context:
@@ -738,6 +1141,35 @@ class SimulationService:
             fallbackTimesMa=fallback_times,
             pygplatesAvailable=context.pygplates_available,
         )
+
+    def get_plausibility_report(self, project_id: str) -> PlausibilityReport:
+        project = self.metadata.get_project(project_id)
+        if project is None:
+            raise ValueError(f"project {project_id} not found")
+
+        if project.currentRunId is None:
+            return PlausibilityReport(projectId=project_id, runId=None, checks=[], summary={"error": 0, "warning": 0, "info": 0})
+
+        run_id = project.currentRunId
+        context = self._resolve_context(project_id, run_id)
+        checks: list[PlausibilityCheck] = []
+
+        if context and context.plausibility_by_time:
+            for time_ma in sorted(context.plausibility_by_time.keys(), reverse=True):
+                checks.extend(context.plausibility_by_time[time_ma])
+        else:
+            run_config = context.config if context else project.config
+            steps = self._time_steps(run_config.startTimeMa, run_config.endTimeMa, run_config.timeIncrementMyr)
+            sample_times = steps[:: max(1, len(steps) // 12)]
+            for time_ma in sample_times:
+                frame_payload = self.project_store.read_frame(project_id, run_id, time_ma)
+                if frame_payload is None:
+                    continue
+                frame = TimelineFrame.model_validate(frame_payload)
+                checks.extend(build_plausibility_checks_from_frame(frame))
+
+        summary = summarize_check_severity(checks)
+        return PlausibilityReport(projectId=project_id, runId=run_id, checks=checks, summary=summary)
 
     def create_bookmark(self, project: ProjectSummary, time_ma: int, label: str, region: dict[str, Any] | None) -> Bookmark:
         frame_summary = self.get_or_create_frame(project, time_ma)
@@ -933,15 +1365,29 @@ class SimulationService:
         solver_mode = run_context.config.simulationMode if run_context else project.config.simulationMode
         rigor_profile = run_context.config.rigorProfile if run_context else project.config.rigorProfile
         coverage_ratio = run_context.global_coverage if run_context else frame_coverage_ratio(frame)
+        solver_version = run_context.config.solverVersion if run_context else project.config.solverVersion
+        model_version = self._solver_model_version(run_context.config if run_context else project.config)
+        quality_mode = run_context.quality_mode if run_context else QualityMode.quick
+        source_quick_run_id = run_context.source_quick_run_id if run_context else None
+        macro_digest = run_context.macro_digest if run_context else ""
 
         kinematic_digest = stable_hash([kin.model_dump(mode="json") for kin in frame.plateKinematics])
         uncertainty_digest = stable_hash(frame.uncertaintySummary.model_dump(mode="json"))
+        transition_rules_digest = stable_hash([item.model_dump(mode="json") for item in frame.boundaryStates])
+        coefficients_digest = stable_hash(
+            {
+                "supercontinentBiasStrength": (run_context.config.supercontinentBiasStrength if run_context else project.config.supercontinentBiasStrength),
+                "maxPlateVelocityCmYr": (run_context.config.maxPlateVelocityCmYr if run_context else project.config.maxPlateVelocityCmYr),
+                "simulationMode": solver_mode.value,
+            }
+        )
+        diagnostic_profile_digest = stable_hash(frame.plateLifecycleState.model_dump(mode="json") if frame.plateLifecycleState else {})
 
         provenance = ProvenanceRecord(
             projectHash=project.projectHash,
             seed=project.config.seed,
             engineVersion=ENGINE_VERSION,
-            modelVersion=MODEL_VERSION,
+            modelVersion=model_version,
             solverMode=solver_mode,
             rigorProfile=rigor_profile,
             parameterHash=stable_hash(request.model_dump(mode="json")),
@@ -949,6 +1395,14 @@ class SimulationService:
             kinematicDigest=kinematic_digest,
             uncertaintyDigest=uncertainty_digest,
             modelCoverage=coverage_ratio,
+            solverVersion=solver_version,
+            coefficientsDigest=coefficients_digest,
+            transitionRulesDigest=transition_rules_digest,
+            diagnosticProfileDigest=diagnostic_profile_digest,
+            macroDigest=macro_digest,
+            qualityMode=quality_mode,
+            sourceQuickRunId=source_quick_run_id,
+            surfaceProfileDigest=stable_hash({"qualityMode": quality_mode.value, "width": request.width, "height": request.height}),
         )
 
         metadata_payload = {
@@ -1026,6 +1480,22 @@ class SimulationService:
             frame = TimelineFrame.model_validate(frame_payload)
             issues.extend(validate_frame(frame))
             issues.extend(validate_frame_pair(previous_frame, frame))
+            if frame.boundaryStates:
+                for check in build_plausibility_checks_from_frame(frame):
+                    if check.severity not in {"error", "warning"}:
+                        continue
+                    issues.append(
+                        ValidationIssue(
+                            code=check.checkId,
+                            severity=check.severity,
+                            message=check.explanation,
+                            details={
+                                "observedValue": check.observedValue,
+                                "expected": check.expectedRangeOrRule,
+                                "timeRangeMa": list(check.timeRangeMa),
+                            },
+                        )
+                    )
             previous_frame = frame
 
         coverage = self.get_coverage_report(project_id)

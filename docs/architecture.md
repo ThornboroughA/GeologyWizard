@@ -11,6 +11,12 @@
 - Coherent plate state evolution with continuity tracking.
 - Boundary kinematics + event synthesis with persistence windows.
 
+2b. `Tectonic state v2` (`services/engine/geologic_wizard_engine/modules/tectonics_v2/*`)
+- Deterministic lifecycle/state-machine kernel.
+- Persistent boundary classes: `ridge`, `rift`, `transform`, `subduction`, `collision`, `passive_margin`, `suture`.
+- Oceanic crust age/recycling grids + terrain-memory coupling.
+- Supercontinent clustering diagnostics + structured plausibility checks.
+
 3. `PyGPlates adapter` (`services/engine/geologic_wizard_engine/modules/pygplates_adapter.py`)
 - Optional runtime binding.
 - Caches Rotation/Reconstruct/Topological model handles when available.
@@ -33,6 +39,12 @@
 
 - `GET /v1/projects/{projectId}/frames/{timeMa}/diagnostics`
 - `GET /v1/projects/{projectId}/coverage`
+- `POST /v2/projects`
+- `POST /v2/projects/{projectId}/generate`
+- `GET /v2/projects/{projectId}/timeline-index`
+- `GET /v2/projects/{projectId}/frames/{timeMa}`
+- `GET /v2/projects/{projectId}/frames/{timeMa}/diagnostics`
+- `GET /v2/projects/{projectId}/plausibility`
 - Generation overrides via `POST /v1/projects/{projectId}/generate`:
   - `simulationModeOverride`
   - `rigorProfileOverride`

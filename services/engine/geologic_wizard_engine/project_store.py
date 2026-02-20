@@ -25,6 +25,10 @@ class ProjectStore:
         ensure_dir(root / "cache" / "preview")
         ensure_dir(root / "cache" / "strain")
         ensure_dir(root / "cache" / "refined")
+        ensure_dir(root / "cache" / "oceanic_age")
+        ensure_dir(root / "cache" / "crust_type")
+        ensure_dir(root / "cache" / "crust_thickness")
+        ensure_dir(root / "cache" / "tectonic_potential")
         ensure_dir(root / "tectonics")
         self.write_json(root / "working" / "config.json", config_json)
         # Placeholders for GPML/ROT interoperability files.
@@ -87,14 +91,26 @@ class ProjectStore:
                 continue
         return sorted(times, reverse=True)
 
-    def preview_array_path(self, project_id: str, time_ma: int) -> Path:
-        return self.project_dir(project_id) / "cache" / "preview" / f"{time_ma}.npy"
+    def preview_array_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
+        return self.project_dir(project_id) / "cache" / "preview" / f"{run_id}_{time_ma}.npy"
 
-    def strain_array_path(self, project_id: str, time_ma: int) -> Path:
-        return self.project_dir(project_id) / "cache" / "strain" / f"{time_ma}.npy"
+    def strain_array_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
+        return self.project_dir(project_id) / "cache" / "strain" / f"{run_id}_{time_ma}.npy"
 
     def refined_array_path(self, project_id: str, bookmark_id: str, refinement_level: int) -> Path:
         return self.project_dir(project_id) / "cache" / "refined" / f"{bookmark_id}_L{refinement_level}.npy"
+
+    def oceanic_age_array_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
+        return self.project_dir(project_id) / "cache" / "oceanic_age" / f"{run_id}_{time_ma}.npy"
+
+    def crust_type_array_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
+        return self.project_dir(project_id) / "cache" / "crust_type" / f"{run_id}_{time_ma}.npy"
+
+    def crust_thickness_array_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
+        return self.project_dir(project_id) / "cache" / "crust_thickness" / f"{run_id}_{time_ma}.npy"
+
+    def tectonic_potential_array_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
+        return self.project_dir(project_id) / "cache" / "tectonic_potential" / f"{run_id}_{time_ma}.npy"
 
     def write_array(self, path: Path, arr: np.ndarray) -> Path:
         ensure_dir(path.parent)
@@ -112,6 +128,9 @@ class ProjectStore:
 
     def run_manifest_path(self, project_id: str, run_id: str) -> Path:
         return self.run_dir(project_id, run_id) / "manifest.json"
+
+    def macro_history_path(self, project_id: str, run_id: str) -> Path:
+        return self.run_dir(project_id, run_id) / "macro_history.json"
 
     def run_diagnostics_path(self, project_id: str, run_id: str, time_ma: int) -> Path:
         return self.run_dir(project_id, run_id) / "diagnostics" / f"{time_ma}.json"

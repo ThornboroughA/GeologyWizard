@@ -9,6 +9,9 @@ Geologic Wizard is a desktop-first tectonic worldbuilding tool for non-experts. 
 - Simulation backends:
   - `fast_plausible`
   - `hybrid_rigor`
+- Solver versions:
+  - `tectonic_hybrid_backends_v1` (legacy)
+  - `tectonic_state_v2` (new lifecycle/state-machine kernel)
 - Deterministic subsystem seeds (`plates`, `boundaries`, `events`, `terrain`)
 - Frame model now includes:
   - plate/boundary kinematics
@@ -17,6 +20,7 @@ Geologic Wizard is a desktop-first tectonic worldbuilding tool for non-experts. 
 - New diagnostics endpoints:
   - `GET /v1/projects/{projectId}/frames/{timeMa}/diagnostics`
   - `GET /v1/projects/{projectId}/coverage`
+  - `GET /v2/projects/{projectId}/plausibility`
 
 ## Agent reference
 
@@ -72,10 +76,16 @@ npm run tauri:dev
 ## API overview
 
 - `POST /v1/projects`
+- `POST /v2/projects`
 - `POST /v1/projects/{projectId}/generate`
+- `POST /v2/projects/{projectId}/generate`
 - `GET /v1/projects/{projectId}/frames/{timeMa}`
+- `GET /v2/projects/{projectId}/frames/{timeMa}`
 - `GET /v1/projects/{projectId}/frames/{timeMa}/diagnostics`
+- `GET /v2/projects/{projectId}/frames/{timeMa}/diagnostics`
 - `GET /v1/projects/{projectId}/coverage`
+- `GET /v2/projects/{projectId}/timeline-index`
+- `GET /v2/projects/{projectId}/plausibility`
 - `POST /v1/projects/{projectId}/bookmarks`
 - `POST /v1/projects/{projectId}/bookmarks/{bookmarkId}/refine`
 - `POST /v1/projects/{projectId}/edits`

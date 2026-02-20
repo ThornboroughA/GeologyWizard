@@ -1,6 +1,8 @@
 export type FidelityPreset = "kinematic_rules" | "high_physics" | "procedural_light";
 export type SimulationMode = "fast_plausible" | "hybrid_rigor";
 export type RigorProfile = "balanced" | "research";
+export type SolverVersion = "tectonic_hybrid_backends_v1" | "tectonic_state_v2";
+export type QualityMode = "quick" | "full";
 
 export interface PolygonGeometry {
   type: "Polygon";
@@ -36,6 +38,13 @@ export interface ProjectConfig {
   targetRuntimeMinutes: number;
   maxPlateVelocityCmYr: number;
   anchorPlateId?: number | null;
+  solverVersion?: SolverVersion;
+  coreGridWidth?: number | null;
+  coreGridHeight?: number | null;
+  supercontinentBiasStrength?: number;
+  processProfiles?: Record<string, unknown>;
+  enableLifecycleChecks?: boolean;
+  highDetailWindowMyr?: number;
 }
 
 export interface ProjectSummary {
@@ -46,6 +55,8 @@ export interface ProjectSummary {
   updatedAt: string;
   projectHash: string;
   currentRunId?: string | null;
+  latestQuickRunId?: string | null;
+  latestFullRunId?: string | null;
 }
 
 export interface PlateFeature {
@@ -85,6 +96,34 @@ export interface BoundaryKinematics {
   recommendedBoundaryType: "convergent" | "divergent" | "transform";
 }
 
+export type BoundaryStateClass = "ridge" | "rift" | "transform" | "subduction" | "collision" | "passive_margin" | "suture";
+
+export interface BoundaryStateRecord {
+  segmentId: string;
+  stateClass: BoundaryStateClass;
+  lastTransitionMa: number;
+  typePersistenceMyr: number;
+  polarityFlipCount: number;
+  transitionCount: number;
+  subductionFlux: number;
+  averageOceanicAgeMyr: number;
+  motionMismatch: boolean;
+}
+
+export interface PlateLifecycleState {
+  unexplainedPlateBirths: number;
+  unexplainedPlateDeaths: number;
+  netAreaBalanceError: number;
+  continentalAreaFraction: number;
+  oceanicAreaFraction: number;
+  oceanicAgeP99Myr: number;
+  supercontinentPhase: "assembly" | "dispersal" | "stable" | "assembled";
+  supercontinentLargestClusterFraction: number;
+  supercontinentCycleCount: number;
+  shortLivedOrogenyCount: number;
+  uncoupledVolcanicBelts: number;
+}
+
 export interface GeoEvent {
   eventId: string;
   eventType: "orogeny" | "rift" | "subduction" | "arc" | "terrane";
@@ -112,7 +151,13 @@ export interface TimelineFrame {
   eventOverlays: GeoEvent[];
   plateKinematics: PlateKinematics[];
   boundaryKinematics: BoundaryKinematics[];
+  boundaryStates?: BoundaryStateRecord[];
+  plateLifecycleState?: PlateLifecycleState | null;
   strainFieldRef?: string | null;
+  oceanicAgeFieldRef?: string | null;
+  crustTypeFieldRef?: string | null;
+  crustThicknessFieldRef?: string | null;
+  tectonicPotentialFieldRef?: string | null;
   uncertaintySummary: UncertaintySummary;
   previewHeightFieldRef: string;
 }
@@ -141,6 +186,9 @@ export interface TimelineFrameRender {
   landmassGeoJson: GeoJsonFeatureCollection;
   boundaryGeoJson: GeoJsonFeatureCollection;
   overlayGeoJson: GeoJsonFeatureCollection;
+  coastlineGeoJson?: GeoJsonFeatureCollection;
+  activeBeltsGeoJson?: GeoJsonFeatureCollection;
+  reliefFieldRef?: string | null;
   source: "cache" | "generated";
   nearestTimeMa: number;
 }
@@ -181,6 +229,8 @@ export interface FrameDiagnostics {
   coverageGapRatio: number;
   warnings: string[];
   pygplatesStatus: string;
+  metrics?: Record<string, number>;
+  checkIds?: string[];
 }
 
 export interface CoverageReport {
@@ -224,12 +274,32 @@ export interface JobSummary {
 
 export interface ValidationIssue {
   code: string;
-  severity: "error" | "warning";
+  severity: "error" | "warning" | "info";
   message: string;
+  details?: Record<string, unknown>;
 }
 
 export interface ValidationReport {
   projectId: string;
   checkedAt: string;
   issues: ValidationIssue[];
+}
+
+export interface PlausibilityCheck {
+  checkId: string;
+  severity: "error" | "warning" | "info";
+  timeRangeMa: [number, number];
+  regionOrPlateIds: string[];
+  observedValue: number | string;
+  expectedRangeOrRule: string;
+  explanation: string;
+  suggestedFix: string;
+}
+
+export interface PlausibilityReport {
+  projectId: string;
+  runId?: string | null;
+  checkedAt: string;
+  checks: PlausibilityCheck[];
+  summary: Record<string, number>;
 }

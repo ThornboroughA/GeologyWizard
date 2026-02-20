@@ -3,16 +3,18 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   applyExpertEdit,
   createBookmark,
-  createProject,
+  createProjectV2,
   exportBookmark,
-  generateProject,
+  generateProjectV2,
   getCoverage,
-  getFrame,
-  getFrameDiagnostics,
-  getFramesRange,
+  getFrameV2,
+  getFrameDiagnosticsV2,
+  getFramesRangeV2,
+  getProjectV2,
+  getPlausibilityV2,
   getJob,
-  getRenderFrame,
-  getTimelineIndex,
+  getRenderFrameV2,
+  getTimelineIndexV2,
   getValidation,
   listBookmarks,
   refineBookmark
@@ -25,8 +27,10 @@ import type {
   CoverageReport,
   FrameDiagnostics,
   JobSummary,
+  PlausibilityReport,
   ProjectConfig,
   ProjectSummary,
+  QualityMode,
   TimelineFrame,
   TimelineFrameRender,
   TimelineIndex,
@@ -46,7 +50,13 @@ const DEFAULT_CONFIG: ProjectConfig = {
   rigorProfile: "balanced",
   targetRuntimeMinutes: 60,
   maxPlateVelocityCmYr: 14,
-  anchorPlateId: null
+  anchorPlateId: null,
+  solverVersion: "tectonic_state_v2",
+  coreGridWidth: 512,
+  coreGridHeight: 256,
+  supercontinentBiasStrength: 0.5,
+  enableLifecycleChecks: true,
+  highDetailWindowMyr: 30
 };
 
 const SETTLE_DELAY_MS = 220;
@@ -65,6 +75,8 @@ export default function App() {
   const [projectName, setProjectName] = useState("Asterion");
   const [config, setConfig] = useState<ProjectConfig>(DEFAULT_CONFIG);
   const [project, setProject] = useState<ProjectSummary | null>(null);
+  const [qualityMode, setQualityMode] = useState<QualityMode>("quick");
+  const [showExpertControls, setShowExpertControls] = useState(false);
 
   const [timeMa, setTimeMa] = useState(1000);
   const [scrubState, setScrubState] = useState<"idle" | "dragging" | "settling">("idle");
@@ -80,11 +92,14 @@ export default function App() {
   const [validation, setValidation] = useState<ValidationReport | null>(null);
   const [diagnostics, setDiagnostics] = useState<FrameDiagnostics | null>(null);
   const [coverage, setCoverage] = useState<CoverageReport | null>(null);
+  const [plausibility, setPlausibility] = useState<PlausibilityReport | null>(null);
 
   const [bookmarkLabel, setBookmarkLabel] = useState("Key tectonic phase");
   const [selectedBookmarkId, setSelectedBookmarkId] = useState<string>("");
   const [viewMode, setViewMode] = useState<"2d" | "3d">("2d");
-  const [overlay, setOverlay] = useState<"none" | "velocity" | "boundary_class" | "event_confidence" | "uplift" | "subsidence">("none");
+  const [overlay, setOverlay] = useState<
+    "none" | "velocity" | "boundary_class" | "event_confidence" | "uplift" | "subsidence" | "boundary_state" | "crust_age" | "orogeny_phase" | "subduction_flux"
+  >("none");
   const [status, setStatus] = useState("Ready");
   const [error, setError] = useState<string | null>(null);
 
@@ -141,7 +156,7 @@ export default function App() {
     const upper = Math.min(startTimeMa, centerTimeMa + PREFETCH_WINDOW_MA);
     const lower = Math.max(endTimeMa, centerTimeMa - PREFETCH_WINDOW_MA);
     try {
-      const response = await getFramesRange(projectId, {
+      const response = await getFramesRangeV2(projectId, {
         timeFrom: upper,
         timeTo: lower,
         step: PREFETCH_STEP_MA,
@@ -166,9 +181,9 @@ export default function App() {
     setScrubState("settling");
     try {
       const [exactRender, fullFrame, frameDiagnostics] = await Promise.all([
-        getRenderFrame(projectId, targetTimeMa, { exact: true, signal: controller.signal }),
-        getFrame(projectId, targetTimeMa, controller.signal),
-        getFrameDiagnostics(projectId, targetTimeMa, controller.signal).catch(() => null)
+        getRenderFrameV2(projectId, targetTimeMa, { exact: true, signal: controller.signal }),
+        getFrameV2(projectId, targetTimeMa, controller.signal),
+        getFrameDiagnosticsV2(projectId, targetTimeMa, controller.signal).catch(() => null)
       ]);
 
       if (controller.signal.aborted || requestId !== requestIdRef.current) {
@@ -259,17 +274,21 @@ export default function App() {
   }, [project, runningJobIds, timeMa]);
 
   async function refreshProjectPanels(projectId: string, frameTime: number) {
-    const [bookmarkList, validationReport, coverageReport, nextTimelineIndex] = await Promise.all([
+    const [projectSummary, bookmarkList, validationReport, coverageReport, nextTimelineIndex, plausibilityReport] = await Promise.all([
+      getProjectV2(projectId),
       listBookmarks(projectId),
       getValidation(projectId),
       getCoverage(projectId),
-      getTimelineIndex(projectId)
+      getTimelineIndexV2(projectId),
+      getPlausibilityV2(projectId)
     ]);
 
+    setProject(projectSummary);
     setBookmarks(bookmarkList);
     setValidation(validationReport);
     setCoverage(coverageReport);
     setTimelineIndex(nextTimelineIndex);
+    setPlausibility(plausibilityReport);
 
     await fetchExactFrame(projectId, frameTime);
   }
@@ -278,7 +297,10 @@ export default function App() {
     setError(null);
     setStatus("Creating project");
     try {
-      const created = await createProject(projectName, config);
+      const created = await createProjectV2(projectName, {
+        ...config,
+        solverVersion: "tectonic_state_v2"
+      });
       setProject(created);
       setTimeMa(created.config.startTimeMa);
       setJobs([]);
@@ -286,6 +308,7 @@ export default function App() {
       setSelectedBookmarkId("");
       setValidation(null);
       setCoverage(null);
+      setPlausibility(null);
       setDiagnostics(null);
       setFrame(null);
       setRenderFrame(null);
@@ -293,7 +316,7 @@ export default function App() {
       setFrameSource("exact");
       renderCacheRef.current.clear();
 
-      const index = await getTimelineIndex(created.projectId);
+      const index = await getTimelineIndexV2(created.projectId);
       setTimelineIndex(index);
 
       await fetchExactFrame(created.projectId, created.config.startTimeMa);
@@ -308,12 +331,18 @@ export default function App() {
       return;
     }
     setError(null);
-    setStatus(`Queued ${config.simulationMode} generation`);
+    setStatus(`Queued ${qualityMode} generation`);
     try {
-      const job = await generateProject(project.projectId, {
+      const sourceQuickRunId =
+        qualityMode === "full"
+          ? project.latestQuickRunId ?? undefined
+          : undefined;
+      const job = await generateProjectV2(project.projectId, {
         simulationModeOverride: config.simulationMode,
         rigorProfileOverride: config.rigorProfile,
-        targetRuntimeMinutesOverride: config.targetRuntimeMinutes
+        targetRuntimeMinutesOverride: config.targetRuntimeMinutes,
+        qualityMode,
+        sourceQuickRunId
       });
       setJobs((current) => mergeJobs(current, [job]));
     } catch (err) {
@@ -423,12 +452,12 @@ export default function App() {
   }
 
   const runtimeMessage =
-    config.simulationMode === "hybrid_rigor"
-      ? "Hybrid rigor mode: better physical plausibility, potentially longer runtime than fast mode."
-      : "Fast plausible mode: optimized for iteration speed with controlled geologic approximations.";
+    qualityMode === "quick"
+      ? "Quick mode: fast preview run for iteration."
+      : "Full mode: reuses quick macro history with higher-fidelity surface realization.";
 
   const mapSummary = renderFrame
-    ? `${renderFrame.landmassGeoJson.features.length} landmasses, ${renderFrame.boundaryGeoJson.features.length} boundaries, ${renderFrame.overlayGeoJson.features.length} overlays`
+    ? `${renderFrame.coastlineGeoJson?.features.length ?? 0} coastline segments, ${renderFrame.activeBeltsGeoJson?.features.length ?? renderFrame.boundaryGeoJson.features.length} active belts, ${renderFrame.overlayGeoJson.features.length} overlays`
     : "No frame loaded";
 
   return (
@@ -464,65 +493,116 @@ export default function App() {
             />
           </label>
           <label>
-            Simulation Mode
-            <select
-              value={config.simulationMode}
-              onChange={(event) =>
-                setConfig((current) => ({
-                  ...current,
-                  simulationMode: event.target.value as ProjectConfig["simulationMode"]
-                }))
-              }
-            >
-              <option value="fast_plausible">fast_plausible</option>
-              <option value="hybrid_rigor">hybrid_rigor</option>
+            Run Mode
+            <select value={qualityMode} onChange={(event) => setQualityMode(event.target.value as QualityMode)}>
+              <option value="quick">quick</option>
+              <option value="full">full</option>
             </select>
           </label>
-          <label>
-            Rigor Profile
-            <select
-              value={config.rigorProfile}
-              onChange={(event) =>
-                setConfig((current) => ({
-                  ...current,
-                  rigorProfile: event.target.value as ProjectConfig["rigorProfile"]
-                }))
-              }
-            >
-              <option value="balanced">balanced</option>
-              <option value="research">research</option>
-            </select>
-          </label>
-          <label>
-            Runtime Target (minutes)
-            <input
-              type="number"
-              min={5}
-              max={720}
-              value={config.targetRuntimeMinutes}
-              onChange={(event) =>
-                setConfig((current) => ({ ...current, targetRuntimeMinutes: Number(event.target.value) }))
-              }
-            />
-          </label>
-          <label>
-            Max Plate Velocity (cm/yr)
-            <input
-              type="number"
-              min={3}
-              max={20}
-              step={0.5}
-              value={config.maxPlateVelocityCmYr}
-              onChange={(event) =>
-                setConfig((current) => ({ ...current, maxPlateVelocityCmYr: Number(event.target.value) }))
-              }
-            />
-          </label>
+          <details open={showExpertControls} onToggle={(event) => setShowExpertControls((event.target as HTMLDetailsElement).open)}>
+            <summary>Expert Controls</summary>
+            <label>
+              Simulation Mode
+              <select
+                value={config.simulationMode}
+                onChange={(event) =>
+                  setConfig((current) => ({
+                    ...current,
+                    simulationMode: event.target.value as ProjectConfig["simulationMode"],
+                    coreGridWidth: event.target.value === "hybrid_rigor" ? 720 : 512,
+                    coreGridHeight: event.target.value === "hybrid_rigor" ? 360 : 256
+                  }))
+                }
+              >
+                <option value="fast_plausible">fast_plausible</option>
+                <option value="hybrid_rigor">hybrid_rigor</option>
+              </select>
+            </label>
+            <label>
+              Rigor Profile
+              <select
+                value={config.rigorProfile}
+                onChange={(event) =>
+                  setConfig((current) => ({
+                    ...current,
+                    rigorProfile: event.target.value as ProjectConfig["rigorProfile"]
+                  }))
+                }
+              >
+                <option value="balanced">balanced</option>
+                <option value="research">research</option>
+              </select>
+            </label>
+            <label>
+              Runtime Target (minutes)
+              <input
+                type="number"
+                min={5}
+                max={720}
+                value={config.targetRuntimeMinutes}
+                onChange={(event) =>
+                  setConfig((current) => ({ ...current, targetRuntimeMinutes: Number(event.target.value) }))
+                }
+              />
+            </label>
+            <label>
+              Max Plate Velocity (cm/yr)
+              <input
+                type="number"
+                min={3}
+                max={20}
+                step={0.5}
+                value={config.maxPlateVelocityCmYr}
+                onChange={(event) =>
+                  setConfig((current) => ({ ...current, maxPlateVelocityCmYr: Number(event.target.value) }))
+                }
+              />
+            </label>
+            <label>
+              Core Grid Width
+              <input
+                type="number"
+                min={256}
+                max={2048}
+                step={16}
+                value={config.coreGridWidth ?? 512}
+                onChange={(event) =>
+                  setConfig((current) => ({ ...current, coreGridWidth: Number(event.target.value) }))
+                }
+              />
+            </label>
+            <label>
+              Core Grid Height
+              <input
+                type="number"
+                min={128}
+                max={1024}
+                step={16}
+                value={config.coreGridHeight ?? 256}
+                onChange={(event) =>
+                  setConfig((current) => ({ ...current, coreGridHeight: Number(event.target.value) }))
+                }
+              />
+            </label>
+            <label>
+              Supercontinent Bias
+              <input
+                type="number"
+                min={0}
+                max={1}
+                step={0.05}
+                value={config.supercontinentBiasStrength ?? 0.5}
+                onChange={(event) =>
+                  setConfig((current) => ({ ...current, supercontinentBiasStrength: Number(event.target.value) }))
+                }
+              />
+            </label>
+          </details>
           <p className="muted">{runtimeMessage}</p>
           <div className="button-row">
             <button onClick={handleCreateProject}>Create Project</button>
             <button onClick={handleGenerate} disabled={!project}>
-              Generate Timeline
+              Run {qualityMode}
             </button>
           </div>
 
@@ -602,6 +682,10 @@ export default function App() {
                 <option value="event_confidence">event_confidence</option>
                 <option value="uplift">uplift</option>
                 <option value="subsidence">subsidence</option>
+                <option value="boundary_state">boundary_state</option>
+                <option value="crust_age">crust_age</option>
+                <option value="orogeny_phase">orogeny_phase</option>
+                <option value="subduction_flux">subduction_flux</option>
               </select>
             </label>
             <p className="muted">{mapSummary}</p>
@@ -640,6 +724,14 @@ export default function App() {
                 <p>Coverage gap ratio: {diagnostics?.coverageGapRatio.toFixed(2) ?? "n/a"}</p>
                 <p>Continuity alerts: {diagnostics?.continuityViolations.length ?? 0}</p>
               </div>
+              {frame.plateLifecycleState ? (
+                <div>
+                  <strong>Lifecycle</strong>
+                  <p>Oceanic age p99: {frame.plateLifecycleState.oceanicAgeP99Myr.toFixed(1)} Myr</p>
+                  <p>Supercontinent: {frame.plateLifecycleState.supercontinentPhase}</p>
+                  <p>Cycle count: {frame.plateLifecycleState.supercontinentCycleCount}</p>
+                </div>
+              ) : null}
             </div>
           ) : null}
         </main>
@@ -677,6 +769,17 @@ export default function App() {
             <p className="muted">Validation report appears after first generation or edit.</p>
           )}
 
+          <h2>Plausibility</h2>
+          {plausibility ? (
+            <div className="project-details">
+              <p>Errors: {plausibility.summary.error ?? 0}</p>
+              <p>Warnings: {plausibility.summary.warning ?? 0}</p>
+              <p>Info: {plausibility.summary.info ?? 0}</p>
+            </div>
+          ) : (
+            <p className="muted">Plausibility report appears for v2 projects after generation.</p>
+          )}
+
           <h2>Timeline Cache</h2>
           {timelineIndex ? (
             <div className="project-details">
@@ -697,6 +800,7 @@ export default function App() {
                 <strong>{project.name}</strong>
               </p>
               <p>Seed: {project.config.seed}</p>
+              <p>Workflow: quick/full</p>
               <p>
                 Range: {project.config.startTimeMa} Ma to {project.config.endTimeMa} Ma
               </p>
